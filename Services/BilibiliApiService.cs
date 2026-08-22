@@ -48,6 +48,144 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
         }
     }
 
+
+    public async Task<QrCodeInfo> GenerateQrCodeAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var response = await _httpClient.GetAsync("https://passport.bilibili.com/x/passport-login/web/qrcode/generate", ct);
+            var json = await response.Content.ReadAsStringAsync();
+            var data = JObject.Parse(json);
+
+            if (data["code"]?.Value<int>() != 0)
+            {
+                var msg = data["message"]?.Value<string>() ?? "生成二维码失败";
+                _logger.LogWarning("生成二维码失败: {Msg}", msg);
+                return new QrCodeInfo { Success = false, Message = msg };
+            }
+
+            var qrData = data["data"];
+            if (qrData == null)
+            {
+                return new QrCodeInfo { Success = false, Message = "二维码响应缺少data字段" };
+            }
+
+            var key = qrData["qrcode_key"]?.Value<string>() ?? "";
+            var url = qrData["url"]?.Value<string>() ?? "";
+            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(url))
+            {
+                return new QrCodeInfo { Success = false, Message = "二维码字段不完整" };
+            }
+
+            _logger.LogInformation("二维码生成成功: key={Key}", key);
+            return new QrCodeInfo { Success = true, QrCodeKey = key, QrCodeUrl = url };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "生成二维码异常");
+            return new QrCodeInfo { Success = false, Message = $"异常: {ex.Message}" };
+        }
+    }
+
+    public async Task<QrCodePollResult> PollQrCodeStatusAsync(string qrcodeKey, CancellationToken ct = default)
+    {
+        try
+        {
+            var url = $"https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={Uri.EscapeDataString(qrcodeKey)}";
+            var response = await _httpClient.GetAsync(url, ct);
+            var json = await response.Content.ReadAsStringAsync();
+            var data = JObject.Parse(json);
+
+            var code = data["code"]?.Value<int>() ?? -1;
+            if (code != 0)
+            {
+                return new QrCodePollResult { Status = 3, Message = data["message"]?.Value<string>() ?? "轮询失败" };
+            }
+
+            var pollData = data["data"];
+            if (pollData == null)
+            {
+                return new QrCodePollResult { Status = 3, Message = "轮询响应缺少data" };
+            }
+
+            var statusCode = pollData["code"]?.Value<int>() ?? -1;
+            var message = pollData["message"]?.Value<string>() ?? "";
+
+            switch (statusCode)
+            {
+                case 86101:
+                    return new QrCodePollResult { Status = 3, Message = "等待扫码..." };
+
+                case 86090:
+                    return new QrCodePollResult { Status = 0, Message = "已扫码，请在手机上确认" };
+
+                case 86038:
+                    return new QrCodePollResult { Status = 2, Message = "二维码已过期，请重新生成" };
+
+                case 0:
+                {
+                    // 扫码成功！从Set-Cookie响应头提取Cookie
+                    var cookies = new List<string>();
+                    if (response.Headers.TryGetValues("Set-Cookie", out var setCookieValues))
+                    {
+                        foreach (var setCookie in setCookieValues)
+                        {
+                            // 格式: name=value; path=/; domain=...; 提取name=value部分
+                            var parts = setCookie.Split(';');
+                            if (parts.Length > 0 && parts[0].Contains('='))
+                            {
+                                cookies.Add(parts[0].Trim());
+                            }
+                        }
+                    }
+
+                    // 从URL参数中兜底提取（某些情况Set-Cookie可能为空）
+                    var url = pollData["url"]?.Value<string>() ?? "";
+                    if (cookies.Count == 0 && !string.IsNullOrEmpty(url))
+                    {
+                        var uri = new Uri(url);
+                        var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+                        foreach (string key in query)
+                        {
+                            if (key is "SESSDATA" or "bili_jct" or "DedeUserID" or "DedeUserID__ckMd5")
+                            {
+                                cookies.Add($"{key}={query[key]}");
+                            }
+                        }
+                    }
+
+                    var cookieStr = string.Join("; ", cookies);
+                    var uname = pollData["uname"]?.Value<string>() ?? "";
+                    var mid = pollData["mid"]?.Value<long>() ?? 0;
+
+                    if (string.IsNullOrEmpty(cookieStr))
+                    {
+                        _logger.LogWarning("扫码成功但未提取到Cookie");
+                        return new QrCodePollResult { Status = 1, Message = "扫码成功但Cookie提取失败", Cookie = "" };
+                    }
+
+                    _logger.LogInformation("扫码登录成功: {Uname} (MID: {Mid})", uname, mid);
+                    return new QrCodePollResult
+                    {
+                        Status = 1,
+                        Message = "扫码成功",
+                        Cookie = cookieStr,
+                        UserName = uname,
+                        Mid = mid
+                    };
+                }
+
+                default:
+                    return new QrCodePollResult { Status = 3, Message = message };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "轮询扫码状态异常");
+            return new QrCodePollResult { Status = 3, Message = $"异常: {ex.Message}" };
+        }
+    }
+
     public async Task<LoginStatus> VerifyLoginAsync(CancellationToken ct = default)
     {
         try
