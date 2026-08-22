@@ -55,6 +55,7 @@ public class BiliLearnModule(
     IAudioRecognizerProvider? audioRecognizerProvider,
     ILogger<BiliLearnModule> logger,
     Interactor<BiliLearnModule> interactor,
+    ConfigurationSystem configurationSystem,
     ILanguageModel? languageModel = null) :
     ChatBehaviour,
     IConfigurable<BiliLearnConfig>
@@ -65,6 +66,7 @@ public class BiliLearnModule(
 
     private readonly Interactor<BiliLearnModule> _interactor = interactor;
     private readonly ILanguageModel? _languageModel = languageModel;
+    private readonly ConfigurationSystem _configurationSystem = configurationSystem;
     public BiliLearnConfig Configuration { get; set; } = new();
     private VideoProcessingOrchestrator? _orchestrator;
     private IProgressReporter? _progressReporter;
@@ -352,7 +354,7 @@ public class BiliLearnModule(
                                 try
                                 {
                                     var configJson = System.Text.Json.JsonSerializer.Serialize(Configuration);
-                                    _ = SetModuleConfigAsync("Alife.Plugin.BiliLearn", configJson);
+                _configurationSystem.SetConfiguration(typeof(BiliLearnModule), Configuration, Character?.StorageKey ?? "");
                                 }
                                 catch (Exception ex)
                                 {
@@ -416,8 +418,7 @@ public class BiliLearnModule(
             // 更新配置文件
             try
             {
-                var configJson = System.Text.Json.JsonSerializer.Serialize(Configuration);
-                _ = SetModuleConfigAsync("Alife.Plugin.BiliLearn", configJson);
+                _configurationSystem.SetConfiguration(typeof(BiliLearnModule), Configuration, Character?.StorageKey ?? "");
             }
             catch (Exception ex)
             {
