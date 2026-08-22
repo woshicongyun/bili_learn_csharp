@@ -31,4 +31,9 @@ public interface IBilibiliFetcher : IDisposable
     /// 获取推荐视频列表
     /// </summary>
     Task<List<RecommendItem>> GetRecommendAsync(int count = 10, CancellationToken ct = default);
+    
+    /// <summary>
+    /// 按关键词搜索视频
+    /// </summary>
+    Task<List<VideoSearchResult>> SearchVideosAsync(string keyword, int count = 10, CancellationToken ct = default);
 }
