@@ -48,3 +48,29 @@ public class VideoSearchResult
     public long PlayCount { get; set; }
     public string PublishTime { get; set; } = "";
 }
+
+/// <summary>
+/// 扫码登录 - 二维码信息
+/// </summary>
+public class QrCodeInfo
+{
+    public bool Success { get; set; }
+    public string QrCodeKey { get; set; } = "";
+    public string QrCodeUrl { get; set; } = "";
+    public string Message { get; set; } = "";
+}
+
+/// <summary>
+/// 扫码登录 - 轮询结果
+/// </summary>
+public class QrCodePollResult
+{
+    /// <summary>
+    /// 0=已扫码未确认, 1=扫码成功(含Cookie), 2=二维码过期, 3=未扫码
+    /// </summary>
+    public int Status { get; set; }
+    public string Message { get; set; } = "";
+    public string Cookie { get; set; } = "";
+    public string UserName { get; set; } = "";
+    public long Mid { get; set; }
+}
