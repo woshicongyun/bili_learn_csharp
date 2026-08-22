@@ -89,19 +89,12 @@ public class VideoProcessingOrchestrator : IDisposable
             int estimatedFrames = Math.Max(1, Math.Min(12, info.DurationSeconds / 15));
             int estimatedSeconds = estimatedFrames * 15 + 30;
             string tagsText = info.Tags != null && info.Tags.Count > 0 ? string.Join(", ", info.Tags.Take(5)) : "无";
-            await _progressReporter.ReportAsync(
-                $"🎬 **开始分析视频**
-" +
-                $"**标题**: {info.Title}
-" +
-                $"**UP主**: {info.Owner}
-" +
-                $"**时长**: {FormatDuration(info.DurationSeconds)}
-" +
-                $"**标签**: {tagsText}
-" +
-                $"**简介**: {(info.Description?.Length > 100 ? info.Description.Substring(0, 100) + "..." : info.Description)}
-" +
+            await _progressReporter.ReportAsync(" +
+                $"**标题**: {info.Title}\n" +
+                $"**UP主**: {info.Owner}\n" +
+                $"**时长**: {FormatDuration(info.DurationSeconds)}\n" +
+                $"**标签**: {tagsText}\n" +
+                $"**简介**: {(info.Description?.Length > 100 ? info.Description.Substring(0, 100) + "..." : info.Description)}\n" +
                 $"⏱ 预计提取{(estimatedFrames == 1 ? "1帧" : $"{estimatedFrames}帧")}，总分析耗时{(estimatedSeconds < 60 ? $"约{estimatedSeconds}秒" : $"约{estimatedSeconds / 60}分{estimatedSeconds % 60}秒")}",
                 ProgressLevel.LogAndPush);
 
@@ -145,13 +138,9 @@ public class VideoProcessingOrchestrator : IDisposable
             }
 
             await Task.WhenAll(downloadTasks);
-            
-            await _progressReporter.ReportAsync($"📥 **下载完成**
 " +
-                $"🎬 视频: {(ctx.VideoFilePath != null && File.Exists(ctx.VideoFilePath) ? "✅" : "❌")}
-" +
-                $"🎵 音频: {(ctx.AudioFilePath != null && File.Exists(ctx.AudioFilePath) ? "✅" : "❌")}
-" +
+                $"🎬 视频: {(ctx.VideoFilePath != null && File.Exists(ctx.VideoFilePath) ? "✅" : "❌")}\n" +
+                $"🎵 音频: {(ctx.AudioFilePath != null && File.Exists(ctx.AudioFilePath) ? "✅" : "❌")}\n" +
                 $"正在并行解析字幕、语音和视觉画面...", 
                 ProgressLevel.LogAndPush);
 
@@ -180,15 +169,10 @@ public class VideoProcessingOrchestrator : IDisposable
             }
 
             await Task.WhenAll(analysisTasks);
-
-            await _progressReporter.ReportAsync($"✅ **三源解析完成**
 " +
-                $"📝 字幕: {(sourceStatus["subtitle"] ? "✅" : "❌")}
-" +
-                $"🎵 ASR: {(sourceStatus["asr"] ? "✅" : "❌")}
-" +
-                $"🖼 视觉: {(sourceStatus["visual"] ? "✅" : "❌")}
-" +
+                $"📝 字幕: {(sourceStatus["subtitle"] ? "✅" : "❌")}\n" +
+                $"🎵 ASR: {(sourceStatus["asr"] ? "✅" : "❌")}\n" +
+                $"🖼 视觉: {(sourceStatus["visual"] ? "✅" : "❌")}\n" +
                 $"正在调用语言模型进行综合分析...", ProgressLevel.LogAndPush);
 
             await _progressReporter.ReportAsync("🧠 LLM整合分析中...", ProgressLevel.LogAndPush);
@@ -200,13 +184,9 @@ public class VideoProcessingOrchestrator : IDisposable
             }
             await _progressReporter.ReportAsync($"✅ 整合完成: {ctx.FinalSummary.Length}字符", ProgressLevel.LogAndPush);
             await _progressReporter.ReportAsync($"   信息源状态: 字幕={sourceStatus["subtitle"]} ASR={sourceStatus["asr"]} 视觉={sourceStatus["visual"]}", ProgressLevel.LogAndPush);
-            
-            await _progressReporter.ReportAsync($"🧠 **分析完成**
 " +
-                $"**标题**: {ctx.VideoTitle}
-" +
-                $"**信息源**: 字幕={(sourceStatus["subtitle"] ? "✅" : "❌")} ASR={(sourceStatus["asr"] ? "✅" : "❌")} 视觉={(sourceStatus["visual"] ? "✅" : "❌")}
-" +
+                $"**标题**: {ctx.VideoTitle}\n" +
+                $"**信息源**: 字幕={(sourceStatus["subtitle"] ? "✅" : "❌")} ASR={(sourceStatus["asr"] ? "✅" : "❌")} 视觉={(sourceStatus["visual"] ? "✅" : "❌")}\n" +
                 $"正在保存到知识库...");
 
             var entry = await _llmIntegrator.SaveToKnowledgeBaseAsync(ctx);

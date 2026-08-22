@@ -177,16 +177,11 @@ public class BiliLearnModule(
                 if (result.Success)
                 {
                     var src = result.SourceStatus;
-                    var msg = $"🎓 **学习完成！**
-" +
-                        $"📺 **{result.Title}**
-" +
-                        $"🔗 链接：https://www.bilibili.com/video/{result.Bvid}
-" +
-                        $"🏷️ 分类：{result.Category}
-" +
-                        $"🔍 字幕 {(src.TryGetValue("subtitle", out bool s) && s ? "✅" : "❌")} | ASR {(src.TryGetValue("asr", out bool a) && a ? "✅" : "❌")} | 视觉 {(src.TryGetValue("visual", out bool v) && v ? "✅" : "❌")}
-" +
+                                        var msg = $"🎓 **学习完成！**\n" +
+                        $"📺 **{result.Title}**\n" +
+                        $"🔗 链接：https://www.bilibili.com/video/{result.Bvid}\n" +
+                        $"🏷️ 分类：{result.Category}\n" +
+                        $"🔍 字幕 {(src.TryGetValue("subtitle", out bool s) && s ? "✅" : "❌")} | ASR {(src.TryGetValue("asr", out bool a) && a ? "✅" : "❌")} | 视觉 {(src.TryGetValue("visual", out bool v) && v ? "✅" : "❌")}\n" +
                         $"📌 摘要：{result.Summary}";
                     _interactor.Poke(msg);
                 }

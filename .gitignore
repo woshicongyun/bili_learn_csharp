@@ -1,0 +1,19 @@
+# Build outputs
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+
+# TestApi
+TestApi/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+# Config with secrets
+data/
+config.json
