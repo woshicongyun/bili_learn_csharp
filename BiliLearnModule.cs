@@ -298,6 +298,147 @@ public class BiliLearnModule(
 
 
     [XmlFunction(FunctionMode.OneShot)]
+    [Description("通过扫码方式登录B站，生成二维码供用户扫码，扫码成功后自动获取Cookie并完成登录")]
+    public async Task<string> QrVerify()
+    {
+        try
+        {
+            EnsureInitialized();
+            if (_orchestrator == null || _orchestrator.BiliApi == null)
+            {
+                await _progressReporter!.ReportAsync("❌ 插件未初始化", ProgressLevel.LogAndPush);
+                return "插件未初始化";
+            }
+
+            await _progressReporter!.ReportAsync("📱 **B站扫码登录** 正在生成二维码...", ProgressLevel.LogAndPush);
+
+            // 生成二维码
+            var qrInfo = await _orchestrator.BiliApi.GenerateQrCodeAsync();
+            if (!qrInfo.Success)
+            {
+                await _progressReporter!.ReportAsync($"❌ 二维码生成失败: {qrInfo.Message}", ProgressLevel.LogAndPush);
+                return $"二维码生成失败: {qrInfo.Message}";
+            }
+
+            // 推送二维码URL
+            await _progressReporter!.ReportAsync($"📱 **请使用B站APP扫码登录**\n🔗 [点击打开二维码]({qrInfo.QrCodeUrl})\n\n或访问: {qrInfo.QrCodeUrl}", ProgressLevel.LogAndPush);
+            _interactor.Poke("📱 请用B站APP扫描二维码登录，有效期2分钟");
+
+            // 后台任务轮询扫码状态（最长2分钟）
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var startTime = DateTime.Now;
+                    var maxWait = TimeSpan.FromSeconds(120);
+
+                    while (DateTime.Now - startTime < maxWait)
+                    {
+                        var pollResult = await _orchestrator!.BiliApi.PollQrCodeStatusAsync(qrInfo.QrCodeKey);
+                        
+                        switch (pollResult.Status)
+                        {
+                            case 0: // 已扫码未确认
+                                await _progressReporter!.ReportAsync("✅ 已扫码！请在手机上点击确认登录", ProgressLevel.LogAndPush);
+                                break;
+                            case 1: // 扫码成功
+                            {
+                                await _progressReporter!.ReportAsync($"🎉 扫码成功！正在完成登录...", ProgressLevel.LogAndPush);
+
+                                // 更新配置
+                                Configuration.Cookie = pollResult.Cookie;
+                                
+                                // 更新全局配置（持久化）
+                                try
+                                {
+                                    var configJson = System.Text.Json.JsonSerializer.Serialize(Configuration);
+                                    _ = SetModuleConfigAsync("Alife.Plugin.BiliLearn", configJson);
+                                }
+                                catch (Exception ex)
+                                {
+                                    logger.LogWarning(ex, "保存配置失败");
+                                }
+
+                                // 重新初始化，让新Cookie生效
+                                _orchestrator?.Dispose();
+                                _orchestrator = null;
+                                EnsureInitialized();
+
+                                if (_orchestrator == null)
+                                {
+                                    await _progressReporter!.ReportAsync("❌ 插件重新初始化失败", ProgressLevel.LogAndPush);
+                                    return;
+                                }
+
+                                // 验证登录
+                                await _orchestrator.CheckLoginAsync();
+                                await _progressReporter!.ReportAsync("✅ 登录成功！可以使用搜索/学习功能了", ProgressLevel.LogAndPush);
+                                return;
+                            }
+                            case 2: // 二维码过期
+                                await _progressReporter!.ReportAsync("⏰ 二维码已过期，请重新调用 QrVerify", ProgressLevel.LogAndPush);
+                                return;
+                            case 3: // 等待扫码
+                                // 静默等待，不推送（避免刷屏）
+                                break;
+                        }
+
+                        await Task.Delay(2000);
+                    }
+
+                    await _progressReporter!.ReportAsync("⏰ 扫码超时（2分钟），请重新调用 QrVerify", ProgressLevel.LogAndPush);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "扫码轮询异常");
+                    await _progressReporter!.ReportAsync($"❌ 扫码轮询异常: {ex.Message}", ProgressLevel.LogAndPush);
+                }
+            });
+
+            return "✅ 二维码已生成，请使用B站APP扫码登录";
+        }
+        catch (Exception ex)
+        {
+            await _progressReporter!.ReportAsync($"❌ 扫码登录异常: {ex.Message}", ProgressLevel.LogAndPush);
+            return $"扫码登录异常: {ex.Message}";
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("退出B站登录，清除Cookie")]
+    public async Task<string> Logout()
+    {
+        try
+        {
+            // 清除配置中的Cookie
+            Configuration.Cookie = "";
+
+            // 更新配置文件
+            try
+            {
+                var configJson = System.Text.Json.JsonSerializer.Serialize(Configuration);
+                _ = SetModuleConfigAsync("Alife.Plugin.BiliLearn", configJson);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "保存配置失败");
+            }
+
+            // 释放并重新初始化（此时无Cookie）
+            _orchestrator?.Dispose();
+            _orchestrator = null;
+            EnsureInitialized();
+
+            await _progressReporter!.ReportAsync("👋 已退出B站登录，Cookie已清除", ProgressLevel.LogAndPush);
+            return "✅ 已退出B站登录";
+        }
+        catch (Exception ex)
+        {
+            return $"❌ 退出登录异常: {ex.Message}";
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
     [Description("更新B站Cookie并验证登录状态。输入Cookie字符串（格式 k1=v1; k2=v2）")] 
     public async Task<string> Login([Description("B站Cookie字符串（格式 k1=v1; k2=v2）")] string cookie)
     {
