@@ -33,3 +33,18 @@ public class RecommendItem
 }
 
 
+
+/// <summary>
+/// 视频搜索结果项
+/// </summary>
+public class VideoSearchResult
+{
+    public string Bvid { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Author { get; set; } = "";
+    public string Duration { get; set; } = "";
+    public string Pic { get; set; } = "";
+    public string Description { get; set; } = "";
+    public long PlayCount { get; set; }
+    public string PublishTime { get; set; } = "";
+}
