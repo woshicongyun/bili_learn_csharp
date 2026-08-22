@@ -290,6 +290,61 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
         }
     }
     
+
+    /// <summary>
+    /// 搜索B站视频
+    /// </summary>
+    public async Task<List<VideoSearchResult>> SearchVideosAsync(string keyword, int count = 10, CancellationToken ct = default)
+    {
+        try
+        {
+            // 需要UTF-8编码关键词
+            var encoded = Uri.EscapeDataString(keyword);
+            var url = $"{BaseUrl}/x/web-interface/search/type?search_type=video&keyword={encoded}&page=1&page_size={count}";
+            _logger.LogInformation("搜索视频: {Url}", url);
+            var response = await _httpClient.GetStringAsync(url, ct);
+            var data = JObject.Parse(response);
+
+            if (data["code"]?.Value<int>() != 0)
+            {
+                _logger.LogWarning("搜索失败: {Message}", data["message"]?.Value<string>() ?? "未知错误");
+                return new List<VideoSearchResult>();
+            }
+
+            var result = data["data"]?["result"] as JArray;
+            if (result == null) return new List<VideoSearchResult>();
+
+            var items = new List<VideoSearchResult>();
+            foreach (var item in result)
+            {
+                var bvid = item["bvid"]?.Value<string>() ?? "";
+                if (string.IsNullOrEmpty(bvid)) continue;
+
+                items.Add(new VideoSearchResult
+                {
+                    Bvid = bvid,
+                    Title = item["title"]?.Value<string>()?.Replace("<em class=\"keyword\">", "").Replace("</em>", "") ?? "",
+                    Author = item["author"]?.Value<string>() ?? "",
+                    Duration = item["duration"]?.Value<string>() ?? "",
+                    Pic = item["pic"]?.Value<string>() ?? "",
+                    Description = item["description"]?.Value<string>() ?? "",
+                    PlayCount = item["play"]?.Value<long>() ?? 0,
+                    PublishTime = item["pubdate"] != null
+                        ? DateTimeOffset.FromUnixTimeSeconds(item["pubdate"].Value<long>()).ToString("yyyy-MM-dd")
+                        : ""
+                });
+            }
+
+            _logger.LogInformation("搜索完成: {Keyword} → {Count} 个结果", keyword, items.Count);
+            return items;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "搜索视频异常: {Keyword}", keyword);
+            return new List<VideoSearchResult>();
+        }
+    }
+
     public void Dispose()
     {
         if (!_disposed)
