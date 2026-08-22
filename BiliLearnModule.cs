@@ -296,6 +296,121 @@ public class BiliLearnModule(
         await _orchestrator.CheckLoginAsync();
     }
 
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("更新B站Cookie并验证登录状态。输入Cookie字符串（格式 k1=v1; k2=v2）")] 
+    public async Task<string> Login([Description("B站Cookie字符串（格式 k1=v1; k2=v2）")] string cookie)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(cookie))
+                return "❌ Cookie不能为空";
+
+            // 更新配置
+            Configuration.Cookie = cookie;
+
+            // 重新初始化，让新Cookie生效
+            _orchestrator?.Dispose();
+            _orchestrator = null;
+            EnsureInitialized();
+
+            if (_orchestrator == null)
+                return "❌ 插件初始化失败";
+
+            // 验证登录状态
+            await _orchestrator.CheckLoginAsync();
+            return "✅ 已更新Cookie并执行登录验证，结果见上方推送";
+        }
+        catch (Exception ex)
+        {
+            return $"❌ 登录异常: {ex.Message}";
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("清理临时文件夹（temp目录下视频、音频、关键帧等缓存文件），保持插件根目录整洁")]
+    public string CleanTemp()
+    {
+        try
+        {
+            var workDir = string.IsNullOrEmpty(Configuration.WorkDir)
+                ? Path.Combine(AlifePath.StorageFolderPath, "Plugins", "Alife.Plugin.BiliLearn")
+                : Configuration.WorkDir;
+            var tempDir = Path.Combine(workDir, "temp");
+            
+            if (!Directory.Exists(tempDir))
+                return "✅ temp目录不存在，无需清理";
+
+            var files = Directory.GetFiles(tempDir);
+            int count = 0;
+            long totalSize = 0;
+
+            foreach (var file in files)
+            {
+                try
+                {
+                    var info = new FileInfo(file);
+                    totalSize += info.Length;
+                    File.Delete(file);
+                    count++;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "删除临时文件失败: {File}", file);
+                }
+            }
+
+            // 尝试删除空目录
+            if (Directory.GetFiles(tempDir).Length == 0)
+                Directory.Delete(tempDir, false);
+
+            _interactor.Poke($"🧹 **清理完成**\n共删除 {count} 个临时文件，释放 {totalSize / 1024.0 / 1024.0:F1} MB");
+            return $"✅ 已清理 {count} 个临时文件，释放 {totalSize / 1024.0 / 1024.0:F1} MB";
+        }
+        catch (Exception ex)
+        {
+            return $"❌ 清理异常: {ex.Message}";
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("搜索B站视频：按关键词搜索，返回视频列表（含BV号、标题、UP主、时长、播放量等）")]
+    public async Task<string> SearchBiliVideo([Description("搜索关键词")] string keyword, [Description("返回结果数量，默认10")] int count = 10)
+    {
+        try
+        {
+            EnsureInitialized();
+            if (_orchestrator == null || _orchestrator.BiliApi == null)
+                return "插件未初始化或B站API不可用";
+
+            // 限制搜索数量
+            count = Math.Clamp(count, 1, 20);
+
+            var results = await _orchestrator.BiliApi.SearchVideosAsync(keyword, count);
+            if (results.Count == 0)
+            {
+                _interactor.Poke($"🔍 搜索\"{keyword}\" 未找到相关视频");
+                return "未找到相关视频";
+            }
+
+            var msg = $"🔍 **搜索 \"{keyword}\" → {results.Count} 个结果**\n\n";
+            for (int i = 0; i < results.Count; i++)
+            {
+                var v = results[i];
+                msg += $"{i + 1}. **{v.Title}**\n" +
+                       $"   UP主: {v.Author} | 时长: {v.Duration} | 播放: {v.PlayCount}\n" +
+                       $"   BV号: {v.Bvid}\n\n";
+            }
+
+            _interactor.Poke(msg);
+            return $"✅ 已搜索到 {results.Count} 个视频，结果已推送";
+        }
+        catch (Exception ex)
+        {
+            return $"❌ 搜索异常: {ex.Message}";
+        }
+    }
+
     public void Dispose()
     {
         if (ChatBot != null)
