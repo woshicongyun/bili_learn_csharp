@@ -25,6 +25,7 @@ public class VideoProcessingOrchestrator : IDisposable
     private readonly LLMIntegrator _llmIntegrator;
     private readonly ILogger _logger;
     private readonly string _workDir;
+    private readonly string _tempDir;
     private readonly IProgressReporter _progressReporter;
 
     private readonly KnowledgeBaseService _kbService;
@@ -51,6 +52,9 @@ public class VideoProcessingOrchestrator : IDisposable
         _llmIntegrator = llmIntegrator;
         _logger = logger;
         _workDir = workDir;
+        // 临时文件统一放到 temp 子目录，保持根目录整洁
+        _tempDir = Path.Combine(workDir, "temp");
+        Directory.CreateDirectory(_tempDir);
         _progressReporter = progressReporter;
 
         _frameExtractInterval = config.FrameExtractInterval;
@@ -100,8 +104,8 @@ public class VideoProcessingOrchestrator : IDisposable
 
             cancellationToken.ThrowIfCancellationRequested();
             var downloadTasks = new List<Task>();
-            var videoPath = Path.Combine(_workDir, $"{bvid}_video.mp4");
-            var audioPath = Path.Combine(_workDir, $"{bvid}_audio.m4a");
+            var videoPath = Path.Combine(_tempDir, $"{bvid}_video.mp4");
+            var audioPath = Path.Combine(_tempDir, $"{bvid}_audio.m4a");
 
             if (!string.IsNullOrEmpty(info.VideoUrl))
             {
@@ -279,7 +283,7 @@ public class VideoProcessingOrchestrator : IDisposable
             await _progressReporter.ReportAsync("🖼 视觉分析中...", ProgressLevel.LogOnly);
 
             var descriptions = await _visionProcessor.AnalyzeVisualAsync(
-                ctx.VideoFilePath!, _workDir, ctx.DurationSeconds,
+                ctx.VideoFilePath!, _tempDir, ctx.DurationSeconds,
                 _frameExtractInterval, _maxFrames, _logger, cancellationToken);
 
             if (descriptions.Count > 0)
