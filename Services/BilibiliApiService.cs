@@ -72,7 +72,7 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
 
             var key = qrData["qrcode_key"]?.Value<string>() ?? "";
             var url = qrData["url"]?.Value<string>() ?? "";
-            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(url))
+            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(fallbackUrl))
             {
                 return new QrCodeInfo { Success = false, Message = "二维码字段不完整" };
             }
@@ -140,10 +140,10 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
                     }
 
                     // 从URL参数中兜底提取（某些情况Set-Cookie可能为空）
-                    var url = pollData["url"]?.Value<string>() ?? "";
-                    if (cookies.Count == 0 && !string.IsNullOrEmpty(url))
+                    var fallbackUrl = pollData["url"]?.Value<string>() ?? "";
+                    if (cookies.Count == 0 && !string.IsNullOrEmpty(fallbackUrl))
                     {
-                        var uri = new Uri(url);
+                        var uri = new Uri(fallbackUrl);
                         var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
                         foreach (string key in query)
                         {
