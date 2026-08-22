@@ -7,6 +7,7 @@ using Alife.Function.AIModelUtility;
 using BiliLearn.CSharp.Plugin.Domain.Interfaces;
 using BiliLearn.CSharp.Plugin.Models;
 using BiliLearn.CSharp.Plugin.Services;
+using BiliLearn.CSharp.Plugin.Utils;
 using Microsoft.Extensions.Logging;
 
 namespace BiliLearn.CSharp.Plugin.Processors;
@@ -93,8 +94,8 @@ public class VisionProcessor : IMediaAnalyzer
     public Task<string?> TranscribeAsync(string audioPath, CancellationToken ct = default)
         => Task.FromResult(null as string);
 
-    public Task<StructuredSubtitle> ParseSubtitleAsync(string subtitleJson)
-        => Task.FromResult(new StructuredSubtitle());
+    public Task<List<StructuredSubtitle>> ParseSubtitleAsync(string subtitleJson)
+        => Task.FromResult(new List<StructuredSubtitle>());
 
     public void Dispose() { }
 }

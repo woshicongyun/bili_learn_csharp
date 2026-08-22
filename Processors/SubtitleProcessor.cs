@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Threading;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -18,14 +19,14 @@ public class SubtitleProcessor : IMediaAnalyzer
 
     public SubtitleProcessor(ILogger logger) => _logger = logger;
 
-    public Task<StructuredSubtitle> ParseSubtitleAsync(string jsonContent)
+    public Task<List<StructuredSubtitle>> ParseSubtitleAsync(string jsonContent)
     {
         try
         {
             using var doc = JsonDocument.Parse(jsonContent);
             var root = doc.RootElement;
             if (!root.TryGetProperty("body", out var body) || body.ValueKind != JsonValueKind.Array)
-                return Task.FromResult(new StructuredSubtitle());
+                return Task.FromResult(new List<StructuredSubtitle>());
 
             var items = new List<SubtitleItem>();
             foreach (var item in body.EnumerateArray())
@@ -38,12 +39,12 @@ public class SubtitleProcessor : IMediaAnalyzer
                 });
             }
             _logger.LogInformation("✅ 字幕解析完成: {Count}条", items.Count);
-            return Task.FromResult(new StructuredSubtitle { Items = items });
+            return Task.FromResult(new List<StructuredSubtitle> { new StructuredSubtitle { Items = items } });
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "字幕解析失败");
-            return Task.FromResult(new StructuredSubtitle());
+            return Task.FromResult(new List<StructuredSubtitle>());
         }
     }
 

@@ -81,8 +81,8 @@ public class AudioProcessor : IMediaAnalyzer
     public Task<List<FrameDescription>> AnalyzeVisualAsync(string videoPath, string workDir, int durationSeconds, int intervalSeconds, int maxFrames, ILogger logger, CancellationToken ct = default)
         => Task.FromResult(new List<FrameDescription>());
 
-    public Task<StructuredSubtitle> ParseSubtitleAsync(string subtitleJson)
-        => Task.FromResult(new StructuredSubtitle());
+    public Task<List<StructuredSubtitle>> ParseSubtitleAsync(string subtitleJson)
+        => Task.FromResult(new List<StructuredSubtitle>());
 
     private float[] DecodeTo16kMonoFloat(string path, CancellationToken ct = default)
     {

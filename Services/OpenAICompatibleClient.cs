@@ -84,6 +84,50 @@ public class OpenAICompatibleClient : ILLMService, IDisposable
         }
     }
 
+    public async Task<string?> ChatAsync(string prompt, int maxTokens = 2000, double temperature = 0.7, CancellationToken ct = default)
+    {
+        var payload = new
+        {
+            model = _model,
+            messages = new object[]
+            {
+                new { role = "system", content = "You are a helpful assistant." },
+                new { role = "user", content = prompt }
+            },
+            temperature = temperature,
+            max_tokens = maxTokens
+        };
+
+        var json = JsonSerializer.Serialize(payload);
+        var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+
+        try
+        {
+            var resp = await _httpClient.PostAsync(_baseUrl + "/chat/completions", httpContent, ct);
+            var body = await resp.Content.ReadAsStringAsync(ct);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogError("[OpenAICompatible] API error {Code}: {Body}", resp.StatusCode, body);
+                throw new Exception($"LLM API 调用失败: {resp.StatusCode} {body}");
+            }
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            var content = root.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+            return content?.Trim() ?? "";
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[OpenAICompatible] 调用LLM失败");
+            throw;
+        }
+    }
+
     public void Dispose()
     {
         if (!_disposed)
