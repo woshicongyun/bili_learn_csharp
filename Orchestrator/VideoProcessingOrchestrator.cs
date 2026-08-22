@@ -19,9 +19,9 @@ public class VideoProcessingOrchestrator : IDisposable
 {
     private readonly BilibiliApiService _biliApi;
     private readonly MediaDownloader _downloader;
-    private readonly VisionProcessor _visionProcessor;
-    private readonly AudioProcessor _audioProcessor;
-    private readonly SubtitleProcessor _subtitleProcessor;
+    private readonly IMediaAnalyzer _visionProcessor;
+    private readonly IMediaAnalyzer _audioProcessor;
+    private readonly IMediaAnalyzer _subtitleProcessor;
     private readonly LLMIntegrator _llmIntegrator;
     private readonly ILogger _logger;
     private readonly string _workDir;
@@ -34,9 +34,9 @@ public class VideoProcessingOrchestrator : IDisposable
     public VideoProcessingOrchestrator(
         BilibiliApiService biliApi,
         MediaDownloader downloader,
-        VisionProcessor visionProcessor,
-        AudioProcessor audioProcessor,
-        SubtitleProcessor subtitleProcessor,
+        IMediaAnalyzer visionProcessor,
+        IMediaAnalyzer audioProcessor,
+        IMediaAnalyzer subtitleProcessor,
         LLMIntegrator llmIntegrator,
         ILogger logger,
         string workDir,
@@ -83,18 +83,25 @@ public class VideoProcessingOrchestrator : IDisposable
             ctx.AudioUrl = info.AudioUrl;
             ctx.Category = info.Category;
             ctx.Tags = info.Tags;
+            ctx.Cid = info.Cid;
             await _progressReporter.ReportAsync($"✅ 视频信息: {info.Title} ({info.DurationSeconds}s)", ProgressLevel.LogAndPush);
 
             int estimatedFrames = Math.Max(1, Math.Min(12, info.DurationSeconds / 15));
             int estimatedSeconds = estimatedFrames * 15 + 30;
             string tagsText = info.Tags != null && info.Tags.Count > 0 ? string.Join(", ", info.Tags.Take(5)) : "无";
             await _progressReporter.ReportAsync(
-                $"🎬 **开始分析视频**\n" +
-                $"**标题**: {info.Title}\n" +
-                $"**UP主**: {info.Owner}\n" +
-                $"**时长**: {FormatDuration(info.DurationSeconds)}\n" +
-                $"**标签**: {tagsText}\n" +
-                $"**简介**: {(info.Description?.Length > 100 ? info.Description.Substring(0, 100) + "..." : info.Description)}\n" +
+                $"🎬 **开始分析视频**
+" +
+                $"**标题**: {info.Title}
+" +
+                $"**UP主**: {info.Owner}
+" +
+                $"**时长**: {FormatDuration(info.DurationSeconds)}
+" +
+                $"**标签**: {tagsText}
+" +
+                $"**简介**: {(info.Description?.Length > 100 ? info.Description.Substring(0, 100) + "..." : info.Description)}
+" +
                 $"⏱ 预计提取{(estimatedFrames == 1 ? "1帧" : $"{estimatedFrames}帧")}，总分析耗时{(estimatedSeconds < 60 ? $"约{estimatedSeconds}秒" : $"约{estimatedSeconds / 60}分{estimatedSeconds % 60}秒")}",
                 ProgressLevel.LogAndPush);
 
@@ -139,9 +146,12 @@ public class VideoProcessingOrchestrator : IDisposable
 
             await Task.WhenAll(downloadTasks);
             
-            await _progressReporter.ReportAsync($"📥 **下载完成**\n" +
-                $"🎬 视频: {(ctx.VideoFilePath != null && File.Exists(ctx.VideoFilePath) ? "✅" : "❌")}\n" +
-                $"🎵 音频: {(ctx.AudioFilePath != null && File.Exists(ctx.AudioFilePath) ? "✅" : "❌")}\n" +
+            await _progressReporter.ReportAsync($"📥 **下载完成**
+" +
+                $"🎬 视频: {(ctx.VideoFilePath != null && File.Exists(ctx.VideoFilePath) ? "✅" : "❌")}
+" +
+                $"🎵 音频: {(ctx.AudioFilePath != null && File.Exists(ctx.AudioFilePath) ? "✅" : "❌")}
+" +
                 $"正在并行解析字幕、语音和视觉画面...", 
                 ProgressLevel.LogAndPush);
 
@@ -171,10 +181,14 @@ public class VideoProcessingOrchestrator : IDisposable
 
             await Task.WhenAll(analysisTasks);
 
-            await _progressReporter.ReportAsync($"✅ **三源解析完成**\n" +
-                $"📝 字幕: {(sourceStatus["subtitle"] ? "✅" : "❌")}\n" +
-                $"🎵 ASR: {(sourceStatus["asr"] ? "✅" : "❌")}\n" +
-                $"🖼 视觉: {(sourceStatus["visual"] ? "✅" : "❌")}\n" +
+            await _progressReporter.ReportAsync($"✅ **三源解析完成**
+" +
+                $"📝 字幕: {(sourceStatus["subtitle"] ? "✅" : "❌")}
+" +
+                $"🎵 ASR: {(sourceStatus["asr"] ? "✅" : "❌")}
+" +
+                $"🖼 视觉: {(sourceStatus["visual"] ? "✅" : "❌")}
+" +
                 $"正在调用语言模型进行综合分析...", ProgressLevel.LogAndPush);
 
             await _progressReporter.ReportAsync("🧠 LLM整合分析中...", ProgressLevel.LogAndPush);
@@ -187,9 +201,12 @@ public class VideoProcessingOrchestrator : IDisposable
             await _progressReporter.ReportAsync($"✅ 整合完成: {ctx.FinalSummary.Length}字符", ProgressLevel.LogAndPush);
             await _progressReporter.ReportAsync($"   信息源状态: 字幕={sourceStatus["subtitle"]} ASR={sourceStatus["asr"]} 视觉={sourceStatus["visual"]}", ProgressLevel.LogAndPush);
             
-            await _progressReporter.ReportAsync($"🧠 **分析完成**\n" +
-                $"**标题**: {ctx.VideoTitle}\n" +
-                $"**信息源**: 字幕={(sourceStatus["subtitle"] ? "✅" : "❌")} ASR={(sourceStatus["asr"] ? "✅" : "❌")} 视觉={(sourceStatus["visual"] ? "✅" : "❌")}\n" +
+            await _progressReporter.ReportAsync($"🧠 **分析完成**
+" +
+                $"**标题**: {ctx.VideoTitle}
+" +
+                $"**信息源**: 字幕={(sourceStatus["subtitle"] ? "✅" : "❌")} ASR={(sourceStatus["asr"] ? "✅" : "❌")} 视觉={(sourceStatus["visual"] ? "✅" : "❌")}
+" +
                 $"正在保存到知识库...");
 
             var entry = await _llmIntegrator.SaveToKnowledgeBaseAsync(ctx);
@@ -226,13 +243,13 @@ public class VideoProcessingOrchestrator : IDisposable
                 ctx.SubtitleText = null;
                 return;
             }
-            var items = await _subtitleProcessor.ParseJsonAsync(subtitleJson);
-            if (items.Count > 0)
+            var structured = await _subtitleProcessor.ParseSubtitleAsync(subtitleJson);
+            if (structured.Items.Count > 0)
             {
-                ctx.SubtitleItems = items;
-                ctx.SubtitleText = string.Join(" ", items.Select(i => i.Text));
+                ctx.SubtitleItems = structured.Items;
+                ctx.SubtitleText = structured.FullText;
                 sourceStatus["subtitle"] = true;
-                await _progressReporter.ReportAsync($"✅ 字幕: {items.Count}条 / {ctx.SubtitleText.Length}字", ProgressLevel.LogOnly);
+                await _progressReporter.ReportAsync($"✅ 字幕: {structured.Items.Count}条 / {ctx.SubtitleText.Length}字", ProgressLevel.LogOnly);
             }
             else
             {
@@ -280,24 +297,15 @@ public class VideoProcessingOrchestrator : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             await _progressReporter.ReportAsync("🖼 视觉分析中...", ProgressLevel.LogOnly);
 
-            int interval = _frameExtractInterval;
-            int maxFrames = _maxFrames;
+            var descriptions = await _visionProcessor.AnalyzeVisualAsync(
+                ctx.VideoFilePath!, _workDir, ctx.DurationSeconds,
+                _frameExtractInterval, _maxFrames, _logger, cancellationToken);
 
-            var framePaths = await FFmpegHelper.ExtractFramesAsync(
-                ctx.VideoFilePath!, _workDir, ctx.DurationSeconds, interval, maxFrames, _logger, cancellationToken);
-
-            if (framePaths.Count > 0)
+            if (descriptions.Count > 0)
             {
-                ctx.FramePaths = framePaths;
-                var descriptions = new List<FrameDescription>();
-                foreach (var framePath in framePaths)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var descs = await _visionProcessor.AnalyzeFrameAsync(framePath, 0, interval, cancellationToken);
-                    descriptions.AddRange(descs);
-                }
+                ctx.FramePaths = descriptions.Select(d => d.FramePath).ToList();
                 ctx.KeyFrameDescriptions = descriptions;
-                sourceStatus["visual"] = descriptions.Count > 0;
+                sourceStatus["visual"] = true;
                 await _progressReporter.ReportAsync($"✅ 视觉: {descriptions.Count}帧描述完成", ProgressLevel.LogAndPush);
             }
             else
@@ -318,7 +326,10 @@ public class VideoProcessingOrchestrator : IDisposable
             var status = await _biliApi.VerifyLoginAsync();
             if (status.Valid)
             {
-                var msg = $"✅ 登录有效\n👤 用户: {status.UserName}\n🆔 UID: {status.Uid}\n{(status.IsVip ? "👑 " + status.VipLabel : "")}";
+                var msg = $"✅ 登录有效
+👤 用户: {status.UserName}
+🆔 UID: {status.Uid}
+{(status.IsVip ? "👑 " + status.VipLabel : "")}";
                 await _progressReporter.ReportAsync(msg, ProgressLevel.LogAndPush);
             }
             else
@@ -344,7 +355,8 @@ public class VideoProcessingOrchestrator : IDisposable
         sb.AppendLine($"📚 找到 {results.Count} 条与「{keyword}」相关的知识：");
         foreach (var entry in results.Take(5))
         {
-            sb.AppendLine($"\n【{entry.Category}】{entry.Title}");
+            sb.AppendLine($"
+【{entry.Category}】{entry.Title}");
             sb.AppendLine($"  {entry.Summary}");
         }
         await _progressReporter.ReportAsync($"📚 知识库搜索完成，找到 {results.Count} 条结果", ProgressLevel.LogAndPush);
@@ -372,6 +384,9 @@ public class VideoProcessingOrchestrator : IDisposable
         _downloader?.Dispose();
         _biliApi?.Dispose();
         _llmIntegrator?.Dispose();
+        _visionProcessor?.Dispose();
+        _audioProcessor?.Dispose();
+        _subtitleProcessor?.Dispose();
     }
 }
 
