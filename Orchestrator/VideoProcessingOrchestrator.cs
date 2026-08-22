@@ -26,6 +26,11 @@ public class VideoProcessingOrchestrator : IDisposable
     private readonly ILogger _logger;
     private readonly string _workDir;
     private readonly string _tempDir;
+    
+    /// <summary>
+    /// B站API服务（供外部调用搜索等方法）
+    /// </summary>
+    public IBilibiliFetcher BiliApi { get; private set; } = null!;
     private readonly IProgressReporter _progressReporter;
 
     private readonly KnowledgeBaseService _kbService;
@@ -52,6 +57,7 @@ public class VideoProcessingOrchestrator : IDisposable
         _llmIntegrator = llmIntegrator;
         _logger = logger;
         _workDir = workDir;
+        BiliApi = biliApi;
         // 临时文件统一放到 temp 子目录，保持根目录整洁
         _tempDir = Path.Combine(workDir, "temp");
         Directory.CreateDirectory(_tempDir);
