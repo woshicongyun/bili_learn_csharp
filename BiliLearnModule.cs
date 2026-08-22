@@ -23,14 +23,14 @@ public class BiliLearnConfig
     [Description("B站 Cookie（格式 k1=v1; k2=v2）")]
     public string Cookie { get; set; } = "";
 
-    [Description("DeepSeek API Key")]
-    public string DeepSeekApiKey { get; set; } = "";
+    [Description("LLM API Key（OpenAI规范，支持DeepSeek/OpenAI/通义/硅基流动/Moonshot等）")]
+    public string LlmApiKey { get; set; } = "";
 
-    [Description("DeepSeek API Base URL")]
-    public string DeepSeekBaseUrl { get; set; } = "https://api.deepseek.com/v1";
+    [Description("LLM API Base URL（OpenAI规范，默认DeepSeek）")]
+    public string LlmBaseUrl { get; set; } = "https://api.deepseek.com/v1";
 
-    [Description("DeepSeek 模型（如 deepseek-v4-flash 或 deepseek-v4-pro）")]
-    public string DeepSeekModel { get; set; } = "deepseek-v4-flash";
+    [Description("LLM 模型ID（如 deepseek-chat / gpt-4o / qwen-plus 等）")]
+    public string LlmModel { get; set; } = "deepseek-chat";
 
     [Description("工作目录（留空使用插件目录）")]
     public string WorkDir { get; set; } = "";
@@ -41,7 +41,7 @@ public class BiliLearnConfig
     [Description("视觉分析：最大抽取帧数，默认20")]
     public int MaxFrames { get; set; } = 20;
 
-    [Description("优先使用Alife内置语言模型（为false时使用DeepSeek API）")]
+    [Description("优先使用Alife内置语言模型（为false时使用OpenAI规范API）")]
     public bool UseAlifeLLM { get; set; } = true;
 }
 
@@ -60,7 +60,7 @@ public class BiliLearnModule(
     IConfigurable<BiliLearnConfig>
 {
     // 待确认状态字典
-    private IKnowledgeRepository _knowledgeRepo;
+    private IKnowledgeRepository? _knowledgeRepo;
     private readonly ConcurrentDictionary<string, PendingConfirmation> PendingConfirmations = new();
 
     private readonly Interactor<BiliLearnModule> _interactor = interactor;
@@ -92,8 +92,8 @@ public class BiliLearnModule(
                 : cfg.WorkDir;
             Directory.CreateDirectory(workDir);
 
-            logger.LogInformation("[BiliLearn] 配置 - Cookie长度: {Len}, APIKey长度: {KeyLen}, 模型: {Model}, BaseUrl: {BaseUrl}, 工作目录: {Dir}",
-                cfg.Cookie?.Length ?? 0, cfg.DeepSeekApiKey?.Length ?? 0, cfg.DeepSeekModel, cfg.DeepSeekBaseUrl, workDir);
+            logger.LogInformation("[BiliLearn] 配置 - Cookie长度: {Len}, LLM Key长度: {KeyLen}, 模型: {Model}, BaseUrl: {BaseUrl}, 工作目录: {Dir}",
+                cfg.Cookie?.Length ?? 0, cfg.LlmApiKey?.Length ?? 0, cfg.LlmModel, cfg.LlmBaseUrl, workDir);
 
             var biliApi = new BilibiliApiService(cfg.Cookie ?? "", logger);
             var downloader = new MediaDownloader(logger);
@@ -110,10 +110,10 @@ public class BiliLearnModule(
             else
             {
                 if (cfg.UseAlifeLLM && _languageModel == null)
-                    logger.LogWarning("[BiliLearn] UseAlifeLLM=true 但未注入ILanguageModel，回退到DeepSeek API");
+                    logger.LogWarning("[BiliLearn] UseAlifeLLM=true 但未注入ILanguageModel，回退到OpenAI规范API");
                 else
-                    logger.LogInformation("[BiliLearn] 使用DeepSeek API");
-                llm = new DeepSeekAI(cfg.DeepSeekApiKey ?? "", logger, baseUrl: cfg.DeepSeekBaseUrl, model: cfg.DeepSeekModel);
+                    logger.LogInformation("[BiliLearn] 使用OpenAI规范API: {BaseUrl} 模型: {Model}", cfg.LlmBaseUrl, cfg.LlmModel);
+                llm = new OpenAICompatibleClient(cfg.LlmApiKey ?? "", logger, baseUrl: cfg.LlmBaseUrl, model: cfg.LlmModel);
             }
             var knowledgeBase = new KnowledgeBaseService(logger, workDir);
             _knowledgeRepo = knowledgeBase;
@@ -151,13 +151,12 @@ public class BiliLearnModule(
         EnsureInitialized();
         if (_orchestrator == null) return "插件未初始化";
 
-        var existingEntry = await _knowledgeRepo.GetByBvidAsync(bvid);
+        var existingEntry = await _knowledgeRepo!.GetByBvidAsync(bvid);
         if (existingEntry != null)
         {
             return await HandleExistingVideo(bvid, existingEntry);
         }
 
-        
         if (_activeTasks.ContainsKey(bvid))
             return $"⚠️ 该视频正在分析中，可先取消（CancelLearn）再重试";
         
@@ -178,11 +177,16 @@ public class BiliLearnModule(
                 if (result.Success)
                 {
                     var src = result.SourceStatus;
-                    var msg = $"🎓 **学习完成！**\n" +
-                        $"📺 **{result.Title}**\n" +
-                        $"🔗 链接：https://www.bilibili.com/video/{result.Bvid}\n" +
-                        $"🏷️ 分类：{result.Category}\n" +
-                        $"🔍 字幕 {(src.TryGetValue("subtitle", out bool s) && s ? "✅" : "❌")} | ASR {(src.TryGetValue("asr", out bool a) && a ? "✅" : "❌")} | 视觉 {(src.TryGetValue("visual", out bool v) && v ? "✅" : "❌")}\n" +
+                    var msg = $"🎓 **学习完成！**
+" +
+                        $"📺 **{result.Title}**
+" +
+                        $"🔗 链接：https://www.bilibili.com/video/{result.Bvid}
+" +
+                        $"🏷️ 分类：{result.Category}
+" +
+                        $"🔍 字幕 {(src.TryGetValue("subtitle", out bool s) && s ? "✅" : "❌")} | ASR {(src.TryGetValue("asr", out bool a) && a ? "✅" : "❌")} | 视觉 {(src.TryGetValue("visual", out bool v) && v ? "✅" : "❌")}
+" +
                         $"📌 摘要：{result.Summary}";
                     _interactor.Poke(msg);
                 }
@@ -238,10 +242,7 @@ public class BiliLearnModule(
         _orchestrator?.Dispose();
     }
 
-    
-    /// <summary>
-    /// 处理已学习过的视频
-    /// </summary>
+    // 处理已学习过的视频
     private async Task<string> HandleExistingVideo(string bvid, KnowledgeEntry entry)
     {
         var pending = new PendingConfirmation
@@ -254,18 +255,14 @@ public class BiliLearnModule(
         
         PendingConfirmations[bvid] = pending;
         _interactor.Poke($"📚 {pending.UserQuery}");
-        return $"已学习过该视频，等待确认...";
+        return "已学习过该视频，等待确认...";
     }
 
-    
-    /// <summary>
-    /// 处理用户消息，检测确认回复
-    /// </summary>
-    protected void OnMessageReceived(string message)
+    // 处理用户消息，检测确认回复
+    protected async void OnMessageReceived(string message)
     {
         if (string.IsNullOrWhiteSpace(message)) return;
         
-        // 遍历所有待确认的任务
         var entries = PendingConfirmations.ToArray();
         if (entries.Length == 0) return;
         
@@ -276,20 +273,22 @@ public class BiliLearnModule(
         foreach (var (bvid, pending) in entries)
         {
             if (confirmPatterns.Any(p => lowerMsg.Contains(p)))
-        {
-            _ = Task.Run(async () =>
+            {
+                _ = Task.Run(async () =>
+                {
+                    if (_progressReporter != null)
+                        await _progressReporter.ReportAsync($"✅ 开始重新学习: {bvid}", ProgressLevel.LogAndPush);
+                    if (_orchestrator != null)
+                        await _orchestrator.ProcessAsync(bvid, CancellationToken.None);
+                });
+                PendingConfirmations.TryRemove(bvid, out _);
+            }
+            else if (denyPatterns.Any(p => lowerMsg.Contains(p)))
             {
                 if (_progressReporter != null)
-                    await _progressReporter.ReportAsync($"✅ 开始重新学习: {bvid}", ProgressLevel.LogAndPush);
-                if (_orchestrator != null)
-                    await _orchestrator.ProcessAsync(bvid, CancellationToken.None);
-            });
-        }
-        else if (denyPatterns.Any(p => lowerMsg.Contains(p)))
-        {
-            if (_progressReporter != null)
-                _progressReporter.ReportAsync("已取消重新学习。", ProgressLevel.LogAndPush).GetAwaiter().GetResult();
-        }
+                    await _progressReporter.ReportAsync("已取消重新学习。", ProgressLevel.LogAndPush);
+                PendingConfirmations.TryRemove(bvid, out _);
+            }
         }
     }
 }
