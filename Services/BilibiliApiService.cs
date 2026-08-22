@@ -30,7 +30,10 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
             CookieContainer = new System.Net.CookieContainer()
         };
         _httpClient = new HttpClient(handler);
-        _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+        _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        _httpClient.DefaultRequestHeaders.Add("Referer", "https://www.bilibili.com/");
+        _httpClient.DefaultRequestHeaders.Add("Accept", "application/json, text/plain, */*");
+        _httpClient.DefaultRequestHeaders.Add("Accept-Language", "zh-CN,zh;q=0.9");
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
         
         if (!string.IsNullOrEmpty(cookieString))
@@ -432,14 +435,56 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
     /// <summary>
     /// 搜索B站视频
     /// </summary>
+    private const string MixinKeyOrder = "46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52";
+    private string? _mixinKey;
+
+    private async Task<string> GetMixinKeyAsync(CancellationToken ct = default)
+    {
+        if (_mixinKey != null) return _mixinKey;
+
+        var resp = await _httpClient.GetAsync($"{BaseUrl}/x/web-interface/nav", ct);
+        var json = await resp.Content.ReadAsStringAsync();
+        var data = JObject.Parse(json);
+        var wbi = data["data"]?["wbi_img"];
+        if (wbi == null) throw new Exception("获取WBI密钥失败: 无wbi_img");
+
+        var imgKey = wbi["img_url"]?.Value<string>()?.Split('/').Last().Split('.').First() ?? "";
+        var subKey = wbi["sub_url"]?.Value<string>()?.Split('/').Last().Split('.').First() ?? "";
+        var raw = imgKey + subKey;
+        var order = MixinKeyOrder.Split(',').Select(int.Parse).ToArray();
+        _mixinKey = new string(order.Where(i => i < raw.Length).Select(i => raw[i]).ToArray())[..32];
+        _logger.LogInformation("WBI MixinKey获取成功: {Key}", _mixinKey[..8]);
+        return _mixinKey;
+    }
+
+    private string SignParams(Dictionary<string, string> parameters, string mixinKey)
+    {
+        var sorted = parameters.OrderBy(kv => kv.Key).ToDictionary(kv => kv.Key, kv => kv.Value);
+        var query = string.Join("&", sorted.Select(kv => $"{kv.Key}={Uri.EscapeDataString(kv.Value)}"));
+        _logger.LogInformation("WBI待签名: {Query}", query);
+        using var md5 = System.Security.Cryptography.MD5.Create();
+        var hash = md5.ComputeHash(System.Text.Encoding.UTF8.GetBytes(query + mixinKey));
+        return Convert.ToHexString(hash).ToLower();
+    }
+
     public async Task<List<VideoSearchResult>> SearchVideosAsync(string keyword, int count = 10, CancellationToken ct = default)
     {
         try
         {
             // 需要UTF-8编码关键词
-            var encoded = Uri.EscapeDataString(keyword);
-            var url = $"{BaseUrl}/x/web-interface/search/type?search_type=video&keyword={encoded}&page=1&page_size={count}";
-            _logger.LogInformation("搜索视频: {Url}", url);
+            var mixinKey = await GetMixinKeyAsync(ct);
+            var parameters = new Dictionary<string, string>
+            {
+                ["search_type"] = "video",
+                ["keyword"] = keyword,
+                ["page"] = "1",
+                ["page_size"] = count.ToString(),
+                ["wts"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString()
+            };
+            var wRid = SignParams(parameters, mixinKey);
+            parameters["w_rid"] = wRid;
+            var url = $"{BaseUrl}/x/web-interface/search/type?" + string.Join("&", parameters.Select(kv => $"{kv.Key}={Uri.EscapeDataString(kv.Value)}"));
+            _logger.LogInformation("搜索视频(带WBI签名): {Url}", url);
             var response = await _httpClient.GetStringAsync(url, ct);
             var data = JObject.Parse(response);
 
