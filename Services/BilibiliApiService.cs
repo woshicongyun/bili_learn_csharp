@@ -72,7 +72,7 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
 
             var key = qrData["qrcode_key"]?.Value<string>() ?? "";
             var url = qrData["url"]?.Value<string>() ?? "";
-            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(fallbackUrl))
+            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(url))
             {
                 return new QrCodeInfo { Success = false, Message = "二维码字段不完整" };
             }
