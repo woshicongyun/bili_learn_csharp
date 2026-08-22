@@ -14,8 +14,8 @@ using BiliLearn.CSharp.Plugin.Models;
 using BiliLearn.CSharp.Plugin.Orchestrator;
 using BiliLearn.CSharp.Plugin.Processors;
 using BiliLearn.CSharp.Plugin.Services;
-using Microsoft.Extensions.Logging;
 using BiliLearn.CSharp.Plugin.Utils;
+using Microsoft.Extensions.Logging;
 
 namespace BiliLearn.CSharp.Plugin;
 
@@ -56,7 +56,6 @@ public class BiliLearnModule(
     IAudioRecognizerProvider? audioRecognizerProvider,
     ILogger<BiliLearnModule> logger,
     Interactor<BiliLearnModule> interactor,
-    ConfigurationSystem configurationSystem,
     ILanguageModel? languageModel = null) :
     ChatBehaviour,
     IConfigurable<BiliLearnConfig>
@@ -67,7 +66,6 @@ public class BiliLearnModule(
 
     private readonly Interactor<BiliLearnModule> _interactor = interactor;
     private readonly ILanguageModel? _languageModel = languageModel;
-    private readonly ConfigurationSystem _configurationSystem = configurationSystem;
     public BiliLearnConfig Configuration { get; set; } = new();
     private VideoProcessingOrchestrator? _orchestrator;
     private IProgressReporter? _progressReporter;
@@ -77,18 +75,6 @@ public class BiliLearnModule(
     {
         functionCaller.RegisterHandler(new XmlHandler(this));
         logger.LogInformation("[BiliLearn] 插件已加载，等待配置注入后初始化");
-
-        // 订阅用户消息事件，处理去重确认等交互
-        if (ChatBot != null)
-        {
-            ChatBot.ChatSent += OnMessageReceived;
-            logger.LogInformation("[BiliLearn] 已订阅用户消息事件");
-        }
-        else
-        {
-            logger.LogWarning("[BiliLearn] ChatBot为空，无法订阅用户消息");
-        }
-
         await Task.CompletedTask;
     }
 
@@ -192,7 +178,7 @@ public class BiliLearnModule(
                 if (result.Success)
                 {
                     var src = result.SourceStatus;
-                                        var msg = $"🎓 **学习完成！**\n" +
+                    var msg = $"🎓 **学习完成！\n" +
                         $"📺 **{result.Title}**\n" +
                         $"🔗 链接：https://www.bilibili.com/video/{result.Bvid}\n" +
                         $"🏷️ 分类：{result.Category}\n" +
@@ -222,58 +208,6 @@ public class BiliLearnModule(
     }
     
     [XmlFunction(FunctionMode.OneShot)]
-    [Description("确认重新学习指定BV号的视频，用于去重确认后的继续操作")]
-    public async Task<string> ConfirmRelearn([Description("B站视频BV号")] string bvid)
-    {
-        EnsureInitialized();
-        if (_orchestrator == null) return "插件未初始化";
-
-        // 从待确认队列移除
-        PendingConfirmations.TryRemove(bvid, out _);
-
-        if (_activeTasks.ContainsKey(bvid))
-            return "⚠️ 该视频正在分析中";
-
-        var cts = new CancellationTokenSource();
-        _activeTasks[bvid] = cts;
-
-        if (_progressReporter != null)
-            await _progressReporter.ReportAsync($"✅ 开始重新学习: {bvid}", ProgressLevel.LogAndPush);
-
-        _ = Task.Run(async () => {
-            try
-            {
-                var result = await _orchestrator.ProcessAsync(bvid, cts.Token);
-                if (cts.IsCancellationRequested)
-                {
-                    await _progressReporter!.ReportAsync($"🛑 已取消分析: {bvid}", ProgressLevel.LogAndPush);
-                    return;
-                }
-                if (result.Success)
-                {
-                    await _progressReporter!.ReportAsync($"🎓 **重新学习完成！**\n📺 {bvid}", ProgressLevel.LogAndPush);
-                }
-                else
-                {
-                    await _progressReporter!.ReportAsync($"❌ 学习失败: {result.Message}", ProgressLevel.LogAndPush);
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "[BiliLearn] 重新学习异常: {Bvid}", bvid);
-                if (_progressReporter != null)
-                    await _progressReporter.ReportAsync($"❌ 学习异常: {ex.Message}", ProgressLevel.LogAndPush);
-            }
-            finally
-            {
-                _activeTasks.TryRemove(bvid, out _);
-            }
-        });
-
-        return "已开始重新学习";
-    }
-
-    [XmlFunction(FunctionMode.OneShot)]
     [Description("取消正在进行的B站视频分析")]
     public async Task<string> CancelLearn([Description("B站视频BV号")] string bvid)
     {
@@ -299,121 +233,75 @@ public class BiliLearnModule(
         await _orchestrator.CheckLoginAsync();
     }
 
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("搜索B站视频：按关键词搜索，返回视频列表（含BV号、标题、UP主、时长、播放量等）")]
+    public async Task<string> SearchBiliVideo([Description("搜索关键词")] string keyword, [Description("返回结果数量，默认10")] int count = 10)
+    {
+        EnsureInitialized();
+        if (_orchestrator == null) return "插件未初始化";
+        try
+        {
+            var results = await _orchestrator.BiliApi.SearchVideosAsync(keyword, count);
+            if (results.Count == 0) return "未找到相关视频";
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"🔍 搜索 \"{keyword}\" 找到 {results.Count} 个视频：");
+            for (int i = 0; i < results.Count; i++)
+            {
+                var v = results[i];
+                sb.AppendLine($"{i + 1}. 【{v.Bvid}】{v.Title} - UP:{v.Author} | 播放:{v.PlayCount} | 时长:{v.Duration}");
+            }
+            return sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            return $"❌ 搜索失败: {ex.Message}";
+        }
+    }
 
     [XmlFunction(FunctionMode.OneShot)]
     [Description("通过扫码方式登录B站，生成二维码供用户扫码，扫码成功后自动获取Cookie并完成登录")]
     public async Task<string> QrVerify()
     {
+        EnsureInitialized();
+        if (_orchestrator == null) return "插件未初始化";
+        var qrInfo = await _orchestrator.BiliApi.GenerateQrCodeAsync();
+        if (!qrInfo.Success)
+            return $"❌ 生成二维码失败: {qrInfo.Message}";
+
+        var workDir = string.IsNullOrEmpty(Configuration.WorkDir)
+                ? Path.Combine(AlifePath.StorageFolderPath, "Plugins", "Alife.Plugin.BiliLearn")
+                : Configuration.WorkDir;
+            var qrDir = Path.Combine(workDir, "temp");
+            var qrPng = QrCodeGenerator.GeneratePng(qrInfo.QrCodeUrl, qrDir, logger);
+            var qrBase64 = Convert.ToBase64String(File.ReadAllBytes(qrPng));
+        _interactor.Poke($"📱 **请用B站APP扫码登录**\n\n![QR](data:image/png;base64,{qrBase64})\n\n二维码有效期2分钟，请尽快扫码！");
+
         try
         {
-            EnsureInitialized();
-            if (_orchestrator == null || _orchestrator.BiliApi == null)
+            var deadline = DateTime.Now.AddMinutes(2);
+            while (DateTime.Now < deadline)
             {
-                await _progressReporter!.ReportAsync("❌ 插件未初始化", ProgressLevel.LogAndPush);
-                return "插件未初始化";
-            }
-
-            await _progressReporter!.ReportAsync("📱 **B站扫码登录** 正在生成二维码...", ProgressLevel.LogAndPush);
-
-            // 生成二维码
-            var qrInfo = await _orchestrator.BiliApi.GenerateQrCodeAsync();
-            if (!qrInfo.Success)
-            {
-                await _progressReporter!.ReportAsync($"❌ 二维码生成失败: {qrInfo.Message}", ProgressLevel.LogAndPush);
-                return $"二维码生成失败: {qrInfo.Message}";
-            }
-
-            // 生成二维码图片并推送
-            var qrDir = Path.Combine(AppContext.BaseDirectory, "temp");
-            var qrPath = QrCodeGenerator.GeneratePng(qrInfo.QrCodeUrl, qrDir, logger);
-            if (!string.IsNullOrEmpty(qrPath))
-            {
-                await _progressReporter!.ReportAsync($"📱 **请使用B站APP扫码登录**", ProgressLevel.LogAndPush);
-                _interactor.Poke($"📱 请用B站APP扫描二维码登录，有效期2分钟\n![扫我](file:///{qrPath})");
-            }
-            else
-            {
-                await _progressReporter!.ReportAsync($"📱 **请使用B站APP扫码登录**\n🔗 [点击打开二维码]({qrInfo.QrCodeUrl})", ProgressLevel.LogAndPush);
-                _interactor.Poke("📱 请用B站APP扫描二维码登录，有效期2分钟");
-            }
-
-            // 后台任务轮询扫码状态（最长2分钟）
-            _ = Task.Run(async () =>
-            {
-                try
+                await Task.Delay(3000);
+                var poll = await _orchestrator.BiliApi.PollQrCodeStatusAsync(qrInfo.QrCodeKey);
+                if (poll.Status == 1)
                 {
-                    var startTime = DateTime.Now;
-                    var maxWait = TimeSpan.FromSeconds(120);
-
-                    while (DateTime.Now - startTime < maxWait)
-                    {
-                        var pollResult = await _orchestrator!.BiliApi.PollQrCodeStatusAsync(qrInfo.QrCodeKey);
-                        
-                        switch (pollResult.Status)
-                        {
-                            case 0: // 已扫码未确认
-                                await _progressReporter!.ReportAsync("✅ 已扫码！请在手机上点击确认登录", ProgressLevel.LogAndPush);
-                                break;
-                            case 1: // 扫码成功
-                            {
-                                await _progressReporter!.ReportAsync($"🎉 扫码成功！正在完成登录...", ProgressLevel.LogAndPush);
-
-                                // 更新配置
-                                Configuration.Cookie = pollResult.Cookie;
-                                
-                                // 更新全局配置（持久化）
-                                try
-                                {
-                                    var configJson = System.Text.Json.JsonSerializer.Serialize(Configuration);
-                _configurationSystem.SetConfiguration(typeof(BiliLearnModule), Configuration, Character?.StorageKey ?? "");
-                                }
-                                catch (Exception ex)
-                                {
-                                    logger.LogWarning(ex, "保存配置失败");
-                                }
-
-                                // 重新初始化，让新Cookie生效
-                                _orchestrator?.Dispose();
-                                _orchestrator = null;
-                                EnsureInitialized();
-
-                                if (_orchestrator == null)
-                                {
-                                    await _progressReporter!.ReportAsync("❌ 插件重新初始化失败", ProgressLevel.LogAndPush);
-                                    return;
-                                }
-
-                                // 验证登录
-                                await _orchestrator.CheckLoginAsync();
-                                await _progressReporter!.ReportAsync("✅ 登录成功！可以使用搜索/学习功能了", ProgressLevel.LogAndPush);
-                                return;
-                            }
-                            case 2: // 二维码过期
-                                await _progressReporter!.ReportAsync("⏰ 二维码已过期，请重新调用 QrVerify", ProgressLevel.LogAndPush);
-                                return;
-                            case 3: // 等待扫码
-                                // 静默等待，不推送（避免刷屏）
-                                break;
-                        }
-
-                        await Task.Delay(2000);
-                    }
-
-                    await _progressReporter!.ReportAsync("⏰ 扫码超时（2分钟），请重新调用 QrVerify", ProgressLevel.LogAndPush);
+                    _interactor.Poke($"✅ 登录成功！欢迎 **{poll.UserName ?? "主人"}** (UID: {poll.Mid})！");
+                    return $"✅ 登录成功: {poll.UserName ?? "未知"} (UID: {poll.Mid})";
                 }
-                catch (Exception ex)
+                if (poll.Status == 0)
                 {
-                    logger.LogWarning(ex, "扫码轮询异常");
-                    await _progressReporter!.ReportAsync($"❌ 扫码轮询异常: {ex.Message}", ProgressLevel.LogAndPush);
+                    _interactor.Poke("✅ 已扫码，请在手机上确认登录...");
                 }
-            });
-
-            return "✅ 二维码已生成，请使用B站APP扫码登录";
+                else if (poll.Status == 2)
+                {
+                    return "⚠️ 二维码已过期，请重新生成";
+                }
+            }
+            return "⏰ 二维码已过期，请重试";
         }
         catch (Exception ex)
         {
-            await _progressReporter!.ReportAsync($"❌ 扫码登录异常: {ex.Message}", ProgressLevel.LogAndPush);
-            return $"扫码登录异常: {ex.Message}";
+            return $"❌ 登录过程异常: {ex.Message}";
         }
     }
 
@@ -421,157 +309,58 @@ public class BiliLearnModule(
     [Description("退出B站登录，清除Cookie")]
     public async Task<string> Logout()
     {
+        EnsureInitialized();
+        if (_orchestrator == null) return "插件未初始化";
         try
         {
-            // 清除配置中的Cookie
             Configuration.Cookie = "";
-
-            // 更新配置文件
-            try
-            {
-                _configurationSystem.SetConfiguration(typeof(BiliLearnModule), Configuration, Character?.StorageKey ?? "");
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "保存配置失败");
-            }
-
-            // 释放并重新初始化（此时无Cookie）
-            _orchestrator?.Dispose();
-            _orchestrator = null;
-            EnsureInitialized();
-
-            await _progressReporter!.ReportAsync("👋 已退出B站登录，Cookie已清除", ProgressLevel.LogAndPush);
-            return "✅ 已退出B站登录";
+            _interactor.Poke("👋 已退出B站登录");
+            return "✅ 已退出登录";
         }
         catch (Exception ex)
         {
-            return $"❌ 退出登录异常: {ex.Message}";
-        }
-    }
-
-    [XmlFunction(FunctionMode.OneShot)]
-    [Description("更新B站Cookie并验证登录状态。输入Cookie字符串（格式 k1=v1; k2=v2）")] 
-    public async Task<string> Login([Description("B站Cookie字符串（格式 k1=v1; k2=v2）")] string cookie)
-    {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(cookie))
-                return "❌ Cookie不能为空";
-
-            // 更新配置
-            Configuration.Cookie = cookie;
-
-            // 重新初始化，让新Cookie生效
-            _orchestrator?.Dispose();
-            _orchestrator = null;
-            EnsureInitialized();
-
-            if (_orchestrator == null)
-                return "❌ 插件初始化失败";
-
-            // 验证登录状态
-            await _orchestrator.CheckLoginAsync();
-            return "✅ 已更新Cookie并执行登录验证，结果见上方推送";
-        }
-        catch (Exception ex)
-        {
-            return $"❌ 登录异常: {ex.Message}";
+            return $"❌ 退出失败: {ex.Message}";
         }
     }
 
     [XmlFunction(FunctionMode.OneShot)]
     [Description("清理临时文件夹（temp目录下视频、音频、关键帧等缓存文件），保持插件根目录整洁")]
-    public string CleanTemp()
+    public async Task<string> CleanTemp()
     {
+        EnsureInitialized();
+        if (_orchestrator == null) return "插件未初始化";
         try
         {
             var workDir = string.IsNullOrEmpty(Configuration.WorkDir)
                 ? Path.Combine(AlifePath.StorageFolderPath, "Plugins", "Alife.Plugin.BiliLearn")
                 : Configuration.WorkDir;
             var tempDir = Path.Combine(workDir, "temp");
-            
             if (!Directory.Exists(tempDir))
-                return "✅ temp目录不存在，无需清理";
+                return "✅ 临时目录不存在，无需清理";
 
-            var files = Directory.GetFiles(tempDir);
-            int count = 0;
-            long totalSize = 0;
-
-            foreach (var file in files)
+            int deleted = 0;
+            foreach (var f in Directory.GetFiles(tempDir))
             {
-                try
-                {
-                    var info = new FileInfo(file);
-                    totalSize += info.Length;
-                    File.Delete(file);
-                    count++;
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "删除临时文件失败: {File}", file);
-                }
+                File.Delete(f);
+                deleted++;
             }
-
-            // 尝试删除空目录
-            if (Directory.GetFiles(tempDir).Length == 0)
-                Directory.Delete(tempDir, false);
-
-            _interactor.Poke($"🧹 **清理完成**\n共删除 {count} 个临时文件，释放 {totalSize / 1024.0 / 1024.0:F1} MB");
-            return $"✅ 已清理 {count} 个临时文件，释放 {totalSize / 1024.0 / 1024.0:F1} MB";
+            foreach (var d in Directory.GetDirectories(tempDir))
+            {
+                Directory.Delete(d, true);
+                deleted++;
+            }
+            _interactor.Poke($"🧹 已清理 {deleted} 个临时文件");
+            return $"✅ 清理完成，删除 {deleted} 项";
         }
         catch (Exception ex)
         {
-            return $"❌ 清理异常: {ex.Message}";
+            return $"❌ 清理失败: {ex.Message}";
         }
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
-    [Description("搜索B站视频：按关键词搜索，返回视频列表（含BV号、标题、UP主、时长、播放量等）")]
-    public async Task<string> SearchBiliVideo([Description("搜索关键词")] string keyword, [Description("返回结果数量，默认10")] int count = 10)
-    {
-        try
-        {
-            EnsureInitialized();
-            if (_orchestrator == null || _orchestrator.BiliApi == null)
-                return "插件未初始化或B站API不可用";
-
-            // 限制搜索数量
-            count = Math.Clamp(count, 1, 20);
-
-            var results = await _orchestrator.BiliApi.SearchVideosAsync(keyword, count);
-            if (results.Count == 0)
-            {
-                _interactor.Poke($"🔍 搜索\"{keyword}\" 未找到相关视频");
-                return "未找到相关视频";
-            }
-
-            var msg = $"🔍 **搜索 \"{keyword}\" → {results.Count} 个结果**\n\n";
-            for (int i = 0; i < results.Count; i++)
-            {
-                var v = results[i];
-                msg += $"{i + 1}. **{v.Title}**\n" +
-                       $"   UP主: {v.Author} | 时长: {v.Duration} | 播放: {v.PlayCount}\n" +
-                       $"   BV号: {v.Bvid}\n\n";
-            }
-
-            _interactor.Poke(msg);
-            return $"✅ 已搜索到 {results.Count} 个视频，结果已推送";
-        }
-        catch (Exception ex)
-        {
-            return $"❌ 搜索异常: {ex.Message}";
-        }
-    }
 
     public void Dispose()
     {
-        if (ChatBot != null)
-        {
-            ChatBot.ChatSent -= OnMessageReceived;
-            logger.LogInformation("[BiliLearn] 已取消订阅用户消息事件");
-        }
-
         _orchestrator?.Dispose();
     }
 
@@ -592,60 +381,36 @@ public class BiliLearnModule(
     }
 
     // 处理用户消息，检测确认回复
-    // 处理用户确认
-    protected async Task HandleUserConfirmationAsync(string message)
-    {
-        try
-        {
-            logger.LogInformation("[BiliLearn] 收到消息: {Message}", message);
-            var entries = PendingConfirmations.ToArray();
-            if (entries.Length == 0) return;
-
-            var lowerMsg = message.ToLower().Trim();
-            var confirmPatterns = new[] { "是", "好的", "重新学习", "重新学", "学", "y", "yes" };
-            var denyPatterns = new[] { "否", "不用了", "取消", "不学", "n", "no" };
-
-            foreach (var (bvid, pending) in entries)
-            {
-                if (confirmPatterns.Any(p => lowerMsg.Contains(p)))
-                {
-                    PendingConfirmations.TryRemove(bvid, out _);
-                    if (_progressReporter != null)
-                        await _progressReporter.ReportAsync($"✅ 正在重新学习: {bvid}", ProgressLevel.LogAndPush);
-                    try
-                    {
-                        EnsureInitialized();
-                        var ct = new CancellationTokenSource();
-                        _activeTasks.TryAdd(bvid, ct);
-                        await _orchestrator.ProcessAsync(bvid, ct.Token);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "[BiliLearn] 重新学习失败: {Bvid}", bvid);
-                    }
-                    break;
-                }
-                else if (denyPatterns.Any(p => lowerMsg.Contains(p)))
-                {
-                    PendingConfirmations.TryRemove(bvid, out _);
-                    if (_progressReporter != null)
-                        await _progressReporter.ReportAsync($"已取消重新学习: {bvid}", ProgressLevel.LogAndPush);
-                    break;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "[BiliLearn] 处理用户确认失败");
-        }
-    }
-
-    // 由事件触发
-    protected void OnMessageReceived(string? message)
+    protected async void OnMessageReceived(string message)
     {
         if (string.IsNullOrWhiteSpace(message)) return;
-        if (message.StartsWith("[")) return;
-        _ = HandleUserConfirmationAsync(message);
-    }
         
+        var entries = PendingConfirmations.ToArray();
+        if (entries.Length == 0) return;
+        
+        var lowerMsg = message.ToLower().Trim();
+        var confirmPatterns = new[] { "是", "好的", "重新学习", "重新学", "学", "y", "yes" };
+        var denyPatterns = new[] { "否", "不用了", "取消", "不学", "n", "no" };
+        
+        foreach (var (bvid, pending) in entries)
+        {
+            if (confirmPatterns.Any(p => lowerMsg.Contains(p)))
+            {
+                _ = Task.Run(async () =>
+                {
+                    if (_progressReporter != null)
+                        await _progressReporter.ReportAsync($"✅ 开始重新学习: {bvid}", ProgressLevel.LogAndPush);
+                    if (_orchestrator != null)
+                        await _orchestrator.ProcessAsync(bvid, CancellationToken.None);
+                });
+                PendingConfirmations.TryRemove(bvid, out _);
+            }
+            else if (denyPatterns.Any(p => lowerMsg.Contains(p)))
+            {
+                if (_progressReporter != null)
+                    await _progressReporter.ReportAsync("已取消重新学习。", ProgressLevel.LogAndPush);
+                PendingConfirmations.TryRemove(bvid, out _);
+            }
+        }
+    }
 }
