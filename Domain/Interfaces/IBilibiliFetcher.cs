@@ -6,12 +6,18 @@ using BiliLearn.CSharp.Plugin.Models;
 
 namespace BiliLearn.CSharp.Plugin.Domain.Interfaces;
 
-/// <summary>
-/// B站API抽象接口
-/// 对应现有 BilibiliApiService
-/// </summary>
 public interface IBilibiliFetcher : IDisposable
 {
+    /// <summary>
+    /// 生成扫码登录二维码
+    /// </summary>
+    Task<QrCodeInfo> GenerateQrCodeAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// 轮询扫码登录状态
+    /// </summary>
+    Task<QrCodePollResult> PollQrCodeStatusAsync(string qrcodeKey, CancellationToken ct = default);
+
     /// <summary>
     /// 验证登录状态
     /// </summary>
