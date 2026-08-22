@@ -26,27 +26,31 @@ public static class QrCodeGenerator
             // 调用Python脚本生成二维码
             var script = $@"
 import qrcode, sys, os
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    url = f.read().strip()
 qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=4)
-qr.add_data(sys.argv[1])
+qr.add_data(url)
 qr.make(fit=True)
 img = qr.make_image(fill_color='black', back_color='white')
 img.save(sys.argv[2])
 print(f'OK {{os.path.getsize(sys.argv[2])}}')
 ";
             var scriptPath = Path.Combine(Path.GetTempPath(), $"qr_{Guid.NewGuid():N}.py");
+            var urlPath = Path.Combine(Path.GetTempPath(), $"qr_{Guid.NewGuid():N}.txt");
             File.WriteAllText(scriptPath, script);
-            var scriptArg = scriptPath.Replace("\"", "\\\"");
+            File.WriteAllText(urlPath, text);
 
             var psi = new ProcessStartInfo
             {
                 FileName = "python",
-                Arguments = $"\"{scriptArg}\" \"{text.Replace("\\", "\\\\").Replace("\"", "\\\"")}\" \"{filePath}\"",
+                Arguments = $"\"{scriptPath}\" \"{urlPath}\" \"{filePath}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
 
+            logger?.LogInformation("启动Python生成二维码，参数: {Args}", psi.Arguments);
             using var process = Process.Start(psi);
             if (process == null)
             {
@@ -58,10 +62,14 @@ print(f'OK {{os.path.getsize(sys.argv[2])}}')
             process.WaitForExit(10000);
             logger?.LogInformation("Python二维码输出: {Stdout} 错误: {Stderr}", stdout, stderr);
 
-            // 清理临时Python脚本
+            // 清理临时文件
             if (File.Exists(scriptPath))
             {
                 try { File.Delete(scriptPath); } catch { }
+            }
+            if (File.Exists(urlPath))
+            {
+                try { File.Delete(urlPath); } catch { }
             }
 
             if (process.ExitCode != 0 || !File.Exists(filePath))
