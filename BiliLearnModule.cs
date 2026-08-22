@@ -74,6 +74,18 @@ public class BiliLearnModule(
     {
         functionCaller.RegisterHandler(new XmlHandler(this));
         logger.LogInformation("[BiliLearn] 插件已加载，等待配置注入后初始化");
+
+        // 订阅用户消息事件，处理去重确认等交互
+        if (ChatBot != null)
+        {
+            ChatBot.ChatSent += OnMessageReceived;
+            logger.LogInformation("[BiliLearn] 已订阅用户消息事件");
+        }
+        else
+        {
+            logger.LogWarning("[BiliLearn] ChatBot为空，无法订阅用户消息");
+        }
+
         await Task.CompletedTask;
     }
 
@@ -207,6 +219,58 @@ public class BiliLearnModule(
     }
     
     [XmlFunction(FunctionMode.OneShot)]
+    [Description("确认重新学习指定BV号的视频，用于去重确认后的继续操作")]
+    public async Task<string> ConfirmRelearn([Description("B站视频BV号")] string bvid)
+    {
+        EnsureInitialized();
+        if (_orchestrator == null) return "插件未初始化";
+
+        // 从待确认队列移除
+        PendingConfirmations.TryRemove(bvid, out _);
+
+        if (_activeTasks.ContainsKey(bvid))
+            return "⚠️ 该视频正在分析中";
+
+        var cts = new CancellationTokenSource();
+        _activeTasks[bvid] = cts;
+
+        if (_progressReporter != null)
+            await _progressReporter.ReportAsync($"✅ 开始重新学习: {bvid}", ProgressLevel.LogAndPush);
+
+        _ = Task.Run(async () => {
+            try
+            {
+                var result = await _orchestrator.ProcessAsync(bvid, cts.Token);
+                if (cts.IsCancellationRequested)
+                {
+                    await _progressReporter!.ReportAsync($"🛑 已取消分析: {bvid}", ProgressLevel.LogAndPush);
+                    return;
+                }
+                if (result.Success)
+                {
+                    await _progressReporter!.ReportAsync($"🎓 **重新学习完成！**\n📺 {bvid}", ProgressLevel.LogAndPush);
+                }
+                else
+                {
+                    await _progressReporter!.ReportAsync($"❌ 学习失败: {result.Message}", ProgressLevel.LogAndPush);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "[BiliLearn] 重新学习异常: {Bvid}", bvid);
+                if (_progressReporter != null)
+                    await _progressReporter.ReportAsync($"❌ 学习异常: {ex.Message}", ProgressLevel.LogAndPush);
+            }
+            finally
+            {
+                _activeTasks.TryRemove(bvid, out _);
+            }
+        });
+
+        return "已开始重新学习";
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
     [Description("取消正在进行的B站视频分析")]
     public async Task<string> CancelLearn([Description("B站视频BV号")] string bvid)
     {
@@ -234,6 +298,12 @@ public class BiliLearnModule(
 
     public void Dispose()
     {
+        if (ChatBot != null)
+        {
+            ChatBot.ChatSent -= OnMessageReceived;
+            logger.LogInformation("[BiliLearn] 已取消订阅用户消息事件");
+        }
+
         _orchestrator?.Dispose();
     }
 
@@ -254,36 +324,60 @@ public class BiliLearnModule(
     }
 
     // 处理用户消息，检测确认回复
-    protected async void OnMessageReceived(string message)
+    // 处理用户确认
+    protected async Task HandleUserConfirmationAsync(string message)
     {
-        if (string.IsNullOrWhiteSpace(message)) return;
-        
-        var entries = PendingConfirmations.ToArray();
-        if (entries.Length == 0) return;
-        
-        var lowerMsg = message.ToLower().Trim();
-        var confirmPatterns = new[] { "是", "好的", "重新学习", "重新学", "学", "y", "yes" };
-        var denyPatterns = new[] { "否", "不用了", "取消", "不学", "n", "no" };
-        
-        foreach (var (bvid, pending) in entries)
+        try
         {
-            if (confirmPatterns.Any(p => lowerMsg.Contains(p)))
+            logger.LogInformation("[BiliLearn] 收到消息: {Message}", message);
+            var entries = PendingConfirmations.ToArray();
+            if (entries.Length == 0) return;
+
+            var lowerMsg = message.ToLower().Trim();
+            var confirmPatterns = new[] { "是", "好的", "重新学习", "重新学", "学", "y", "yes" };
+            var denyPatterns = new[] { "否", "不用了", "取消", "不学", "n", "no" };
+
+            foreach (var (bvid, pending) in entries)
             {
-                _ = Task.Run(async () =>
+                if (confirmPatterns.Any(p => lowerMsg.Contains(p)))
                 {
+                    PendingConfirmations.TryRemove(bvid, out _);
                     if (_progressReporter != null)
-                        await _progressReporter.ReportAsync($"✅ 开始重新学习: {bvid}", ProgressLevel.LogAndPush);
-                    if (_orchestrator != null)
-                        await _orchestrator.ProcessAsync(bvid, CancellationToken.None);
-                });
-                PendingConfirmations.TryRemove(bvid, out _);
-            }
-            else if (denyPatterns.Any(p => lowerMsg.Contains(p)))
-            {
-                if (_progressReporter != null)
-                    await _progressReporter.ReportAsync("已取消重新学习。", ProgressLevel.LogAndPush);
-                PendingConfirmations.TryRemove(bvid, out _);
+                        await _progressReporter.ReportAsync($"✅ 正在重新学习: {bvid}", ProgressLevel.LogAndPush);
+                    try
+                    {
+                        EnsureInitialized();
+                        var ct = new CancellationTokenSource();
+                        _activeTasks.TryAdd(bvid, ct);
+                        await _orchestrator.ProcessAsync(bvid, ct.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "[BiliLearn] 重新学习失败: {Bvid}", bvid);
+                    }
+                    break;
+                }
+                else if (denyPatterns.Any(p => lowerMsg.Contains(p)))
+                {
+                    PendingConfirmations.TryRemove(bvid, out _);
+                    if (_progressReporter != null)
+                        await _progressReporter.ReportAsync($"已取消重新学习: {bvid}", ProgressLevel.LogAndPush);
+                    break;
+                }
             }
         }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "[BiliLearn] 处理用户确认失败");
+        }
     }
+
+    // 由事件触发
+    protected void OnMessageReceived(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return;
+        if (message.StartsWith("[")) return;
+        _ = HandleUserConfirmationAsync(message);
+    }
+        
 }
