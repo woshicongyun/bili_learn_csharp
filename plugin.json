@@ -1,0 +1,17 @@
+{
+  "id": "Alife.Plugin.BiliLearn",
+  "name": "B站学习分析",
+  "author": "真央",
+  "description": "分析B站视频内容，提取字幕、语音、视觉信息并归档到知识库。",
+  "tags": [
+    "B站",
+    "视频",
+    "学习",
+    "知识库"
+  ],
+  "dependencies": {
+    "Alife.Function.FunctionCaller": "",
+    "Alife.Function.AIModelUtility": ""
+  },
+  "version": "4.1.0"
+}
