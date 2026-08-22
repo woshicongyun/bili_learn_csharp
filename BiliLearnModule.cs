@@ -15,6 +15,7 @@ using BiliLearn.CSharp.Plugin.Orchestrator;
 using BiliLearn.CSharp.Plugin.Processors;
 using BiliLearn.CSharp.Plugin.Services;
 using Microsoft.Extensions.Logging;
+using BiliLearn.CSharp.Plugin.Utils;
 
 namespace BiliLearn.CSharp.Plugin;
 
@@ -322,9 +323,19 @@ public class BiliLearnModule(
                 return $"二维码生成失败: {qrInfo.Message}";
             }
 
-            // 推送二维码URL
-            await _progressReporter!.ReportAsync($"📱 **请使用B站APP扫码登录**\n🔗 [点击打开二维码]({qrInfo.QrCodeUrl})\n\n或访问: {qrInfo.QrCodeUrl}", ProgressLevel.LogAndPush);
-            _interactor.Poke("📱 请用B站APP扫描二维码登录，有效期2分钟");
+            // 生成二维码图片并推送
+            var qrDir = Path.Combine(AppContext.BaseDirectory, "temp");
+            var qrPath = QrCodeGenerator.GeneratePng(qrInfo.QrCodeUrl, qrDir, logger);
+            if (!string.IsNullOrEmpty(qrPath))
+            {
+                await _progressReporter!.ReportAsync($"📱 **请使用B站APP扫码登录**", ProgressLevel.LogAndPush);
+                _interactor.Poke($"📱 请用B站APP扫描二维码登录，有效期2分钟\n![扫我](file:///{qrPath})");
+            }
+            else
+            {
+                await _progressReporter!.ReportAsync($"📱 **请使用B站APP扫码登录**\n🔗 [点击打开二维码]({qrInfo.QrCodeUrl})", ProgressLevel.LogAndPush);
+                _interactor.Poke("📱 请用B站APP扫描二维码登录，有效期2分钟");
+            }
 
             // 后台任务轮询扫码状态（最长2分钟）
             _ = Task.Run(async () =>
