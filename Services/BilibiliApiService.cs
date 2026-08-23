@@ -17,8 +17,6 @@ namespace BiliLearn.CSharp.Plugin.Services;
 public class BilibiliApiService : IBilibiliFetcher, IDisposable
 {
     private const string BaseUrl = "https://api.bilibili.com";
-    private const string ApiConclusion = "/x/web-interface/view/conclusion/get";
-    private const string ApiVideoInfo = "/x/web-interface/view";
     private readonly HttpClient _httpClient;
     private readonly HttpClientHandler _handler;
     private readonly ILogger _logger;
@@ -395,129 +393,10 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
         }
     }
 
-    /// <summary>
-    /// 从B站AI总结接口获取字幕（一步到位，优先使用）
-    /// </summary>
-    public async Task<string?> GetSubtitleFromConclusionAsync(string bvid, long cid, CancellationToken ct = default)
-    {
-        try
-        {
-            // 先获取视频信息拿 aid 和 up_mid
-            var infoResp = await _httpClient.GetStringAsync($"{BaseUrl}{ApiVideoInfo}?bvid={bvid}", ct);
-            var infoData = JObject.Parse(infoResp);
-            if (infoData["code"]?.Value<int>() != 0)
-            {
-                _logger.LogWarning("conclusion获取视频信息失败: {Bvid}", bvid);
-                return null;
-            }
-            var aid = infoData["data"]?["aid"]?.Value<long>() ?? 0;
-            var upMid = infoData["data"]?["owner"]?["mid"]?.Value<long>() ?? 0;
-            if (aid == 0 || upMid == 0)
-            {
-                _logger.LogWarning("conclusion无法获取aid/up_mid: {Bvid}", bvid);
-                return null;
-            }
-
-            // WBI签名
-            var mixinKey = await GetMixinKeyAsync(ct);
-            var parameters = new Dictionary<string, string>
-            {
-                ["aid"] = aid.ToString(),
-                ["cid"] = cid.ToString(),
-                ["up_mid"] = upMid.ToString(),
-                ["wts"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString()
-            };
-            var wRid = SignParams(parameters, mixinKey);
-            parameters["w_rid"] = wRid;
-            var url = $"{BaseUrl}{ApiConclusion}?" + string.Join("&", parameters.Select(kv => $"{kv.Key}={Uri.EscapeDataString(kv.Value)}"));
-            
-            var response = await _httpClient.GetStringAsync(url, ct);
-            var data = JObject.Parse(response);
-            if (data["code"]?.Value<int>() != 0)
-            {
-                _logger.LogWarning("conclusion接口失败: {Message}", data["message"]?.Value<string>() ?? "未知错误");
-                return null;
-            }
-
-            var modelResult = data["data"]?["model_result"];
-            if (modelResult == null)
-            {
-                _logger.LogInformation("conclusion无model_result: {Bvid}", bvid);
-                return null;
-            }
-
-            // 解析 subtitle[].part_subtitle[]
-            var subtitle = modelResult["subtitle"];
-            if (subtitle == null || !subtitle.HasValues)
-            {
-                _logger.LogInformation("conclusion无字幕数据: {Bvid}", bvid);
-                return null;
-            }
-
-            var items = new List<string>();
-            foreach (var part in subtitle)
-            {
-                var partSubtitles = part["part_subtitle"];
-                if (partSubtitles == null || !partSubtitles.HasValues) continue;
-                foreach (var sub in partSubtitles)
-                {
-                    var content = sub["content"]?.Value<string>();
-                    if (!string.IsNullOrEmpty(content))
-                        items.Add(content);
-                }
-            }
-
-            if (items.Count == 0)
-            {
-                _logger.LogInformation("conclusion字幕为空: {Bvid}", bvid);
-                return null;
-            }
-
-            // 拼装字幕JSON（兼容SubtitleProcessor的body[]格式）
-            var bodyArray = new JArray();
-            double lastFrom = 0;
-            foreach (var part in subtitle)
-            {
-                var partSubtitles = part["part_subtitle"];
-                if (partSubtitles == null || !partSubtitles.HasValues) continue;
-                foreach (var sub in partSubtitles)
-                {
-                    var text = sub["content"]?.Value<string>() ?? "";
-                    if (string.IsNullOrEmpty(text)) continue;
-                    bodyArray.Add(new JObject
-                    {
-                        ["from"] = sub["start_timestamp"]?.Value<double>() ?? lastFrom,
-                        ["to"] = sub["end_timestamp"]?.Value<double>() ?? lastFrom + 1,
-                        ["content"] = text
-                    });
-                    lastFrom = sub["end_timestamp"]?.Value<double>() ?? lastFrom + 1;
-                }
-            }
-
-            var result = new JObject { ["body"] = bodyArray };
-            _logger.LogInformation("成功从conclusion获取字幕: {Bvid} ({Count}条)", bvid, bodyArray.Count);
-            return result.ToString();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "conclusion获取字幕失败: {Bvid} {Cid}", bvid, cid);
-            return null;
-        }
-    }
-
     public async Task<string?> GetSubtitleAsync(string bvid, long cid, CancellationToken ct = default)
     {
         try
         {
-            // 优先走conclusion接口（一步拿到字幕）
-            var conclusionSubtitle = await GetSubtitleFromConclusionAsync(bvid, cid, ct);
-            if (!string.IsNullOrEmpty(conclusionSubtitle))
-            {
-                _logger.LogInformation("使用conclusion接口获取字幕: {Bvid}", bvid);
-                return conclusionSubtitle;
-            }
-
-            // fallback到player/v2
             var response = await _httpClient.GetStringAsync($"{BaseUrl}/x/player/wbi/v2?bvid={bvid}&cid={cid}", ct);
             var data = JObject.Parse(response);
             
@@ -549,6 +428,118 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
         {
             _logger.LogWarning(ex, "获取字幕失败: {Bvid} {Cid}", bvid, cid);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// 通过B站AI总结接口获取字幕（备用字幕源，含summary/outline数据）
+    /// </summary>
+    public async Task<(string? SubtitleJson, string? Summary, string? OutlineJson)> GetSubtitleFromConclusionAsync(string bvid, CancellationToken ct = default)
+    {
+        try
+        {
+            // 1. 获取视频信息（aid, cid, mid）
+            var viewResp = await _httpClient.GetStringAsync($"{BaseUrl}/x/web-interface/view?bvid={bvid}", ct);
+            var viewData = JObject.Parse(viewResp);
+            if (viewData["code"]?.Value<int>() != 0)
+            {
+                _logger.LogWarning("获取视频信息失败: {Bvid}", bvid);
+                return (null, null, null);
+            }
+
+            var aid = viewData["data"]?["aid"]?.Value<long>() ?? 0;
+            var cid = viewData["data"]?["cid"]?.Value<long>() ?? 0;
+            var mid = viewData["data"]?["owner"]?["mid"]?.Value<long>() ?? 0;
+
+            if (aid == 0 || cid == 0 || mid == 0)
+            {
+                _logger.LogWarning("conclusion接口缺少必要参数: aid={Aid} cid={Cid} mid={Mid}", aid, cid, mid);
+                return (null, null, null);
+            }
+
+            // 2. WBI签名调用conclusion接口
+            var mixinKey = await GetMixinKeyAsync(ct);
+            var parameters = new Dictionary<string, string>
+            {
+                ["aid"] = aid.ToString(),
+                ["cid"] = cid.ToString(),
+                ["up_mid"] = mid.ToString(),
+                ["wts"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString()
+            };
+            var wRid = SignParams(parameters, mixinKey);
+            parameters["w_rid"] = wRid;
+
+            var url = $"{BaseUrl}/x/web-interface/view/conclusion/get?" + string.Join("&", parameters.Select(kv => $"{kv.Key}={Uri.EscapeDataString(kv.Value)}"));
+            _logger.LogInformation("调用B站AI总结接口: {Bvid}", bvid);
+
+            var resp = await _httpClient.GetStringAsync(url, ct);
+            var data = JObject.Parse(resp);
+
+            if (data["code"]?.Value<int>() != 0)
+            {
+                _logger.LogWarning("conclusion接口返回错误: {Code} {Message}", data["code"]?.Value<int>(), data["message"]?.Value<string>());
+                return (null, null, null);
+            }
+
+            var modelResult = data["data"]?["model_result"];
+            if (modelResult == null)
+            {
+                _logger.LogInformation("conclusion接口无model_result，AI总结可能未生成");
+                return (null, null, null);
+            }
+
+            // 3. 提取字幕（part_subtitle结构）
+            string? subtitleJson = null;
+            var subtitleArr = modelResult["subtitle"];
+            if (subtitleArr is JArray arr && arr.Count > 0)
+            {
+                var partSubs = new List<JObject>();
+                foreach (var part in arr)
+                {
+                    var partSubtitle = part["part_subtitle"] as JArray;
+                    if (partSubtitle == null) continue;
+                    foreach (var sub in partSubtitle)
+                    {
+                        var content = sub["content"]?.Value<string>() ?? "";
+                        if (string.IsNullOrEmpty(content)) continue;
+                        var start = sub["start_timestamp"]?.Value<double>() ?? 0;
+                        var end = sub["end_timestamp"]?.Value<double>() ?? start;
+                        partSubs.Add(new JObject {
+                            ["from"] = start,
+                            ["to"] = end,
+                            ["content"] = content
+                        });
+                    }
+                }
+
+                if (partSubs.Count > 0)
+                {
+                    // 组装成body[]格式，方便SubtitleProcessor统一解析
+                    subtitleJson = new JObject { ["body"] = new JArray(partSubs) }.ToString();
+                    _logger.LogInformation("conclusion接口获取字幕成功: {Bvid} ({Count}条)", bvid, partSubs.Count);
+                }
+            }
+
+            // 4. 提取summary和outline
+            string? summary = modelResult["summary"]?.Value<string>();
+            var outline = modelResult["outline"] as JArray;
+            string? outlineJson = outline?.ToString();
+
+            if (string.IsNullOrEmpty(summary) && (outline == null || outline.Count == 0))
+            {
+                _logger.LogInformation("conclusion接口暂无AI总结（code=1可能仍在生成中），但字幕可用");
+            }
+            else
+            {
+                _logger.LogInformation("conclusion接口AI总结获取成功: {Bvid}", bvid);
+            }
+
+            return (subtitleJson, summary, outlineJson);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "获取conclusion字幕失败: {Bvid}", bvid);
+            return (null, null, null);
         }
     }
 
