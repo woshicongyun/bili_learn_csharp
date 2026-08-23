@@ -225,7 +225,7 @@ public class VideoProcessingOrchestrator : IDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await _progressReporter.ReportAsync("📝 获取字幕...", ProgressLevel.LogOnly);
+            await _progressReporter.ReportAsync("📝 获取字幕...", ProgressLevel.LogAndPush);
 
             // 优先尝试conclusion接口（AI总结+字幕）
             string? subtitleJson = null;
@@ -303,7 +303,7 @@ public class VideoProcessingOrchestrator : IDisposable
 
                 ctx.SubtitleText = string.Join("\n", parts);
                 sourceStatus["subtitle"] = true;
-                await _progressReporter.ReportAsync($"✅ 字幕: {structured.Items.Count}条 / {ctx.SubtitleText.Length}字{(aiSummary != null ? " + AI总结" : "")}", ProgressLevel.LogOnly);
+                await _progressReporter.ReportAsync($"✅ 字幕: {structured.Items.Count}条 / {ctx.SubtitleText.Length}字{(aiSummary != null ? " + AI总结" : "")}", ProgressLevel.LogAndPush);
             }
             else
             {
