@@ -9,6 +9,9 @@ using Alife.Framework;
 using Alife.Function.AIModelUtility;
 using Alife.Function.FunctionCaller;
 using BiliLearn.CSharp.Plugin.Domain.Interfaces;
+using BiliLearn.CSharp.Plugin.Capabilities.Learn;
+using BiliLearn.CSharp.Plugin.Capabilities.Auth;
+using BiliLearn.CSharp.Plugin.Capabilities.Search;
 using Microsoft.Extensions.Logging;
 
 namespace BiliLearn.CSharp.Plugin;
@@ -56,10 +59,12 @@ public class BiliLearnModule(
 {
     public BiliLearnConfig Configuration { get; set; } = new();
 
-    private BiliLearnService? _service;
+    private ILearnService? _service;
     private ConfirmationService? _confirmationService;
-    private QueueRunner? _queueRunner;
+    private ILearnQueue? _queueRunner;
     private IKnowledgeRepository? _knowledgeRepo;
+    private IAuthService? _authService;
+    private ISearchService? _searchService;
 
     private readonly object _initLock = new();
     private bool _initialized = false;
@@ -68,6 +73,11 @@ public class BiliLearnModule(
     {
         functionCaller.RegisterHandler(new XmlHandler(this));
         logger.LogInformation("[BiliLearn] 插件已加载，等待配置注入后初始化");
+        
+        // 初始化服务
+        EnsureInitialized();
+        logger.LogInformation("[BiliLearn] 服务初始化完成");
+        
         await Task.CompletedTask;
     }
 
@@ -77,31 +87,40 @@ public class BiliLearnModule(
         lock (_initLock)
         {
             if (_initialized) return;
+            try
+            {
+                var services = Bootstrapper.Build(
+                    Configuration, visionModel, audioRecognizerProvider,
+                    languageModel, logger, interactor);
 
-            var services = Bootstrapper.Build(
-                Configuration, visionModel, audioRecognizerProvider,
-                languageModel, logger, interactor);
+                _queueRunner = services.LearnQueue;
+                _knowledgeRepo = services.KnowledgeRepo;
+                _service = services.LearnService;
+                _confirmationService = new ConfirmationService(
+                    logger,
+                    msg => { interactor.Poke(msg); return Task.CompletedTask; },
+                    services.AnalyzeService.ProcessAsync);
 
-            _queueRunner = services.QueueRunner;
-            _knowledgeRepo = services.KnowledgeRepo;
+                _authService = new AuthService(
+                    services,
+                    Configuration,
+                    logger,
+                    msg => { interactor.Poke(msg); return Task.CompletedTask; },
+                    SaveConfigToDisk);
 
-            // 先创建ConfirmationService（BiliLearnService依赖它）
-            _confirmationService = new ConfirmationService(
-                logger,
-                msg => { interactor.Poke(msg); return Task.CompletedTask; },
-                services.Orchestrator.ProcessAsync);
+                _searchService = new SearchService(
+                    services,
+                    logger,
+                    msg => { interactor.Poke(msg); return Task.CompletedTask; });
 
-            _service = new BiliLearnService(
-                services,
-                _confirmationService,
-                Configuration,
-                logger,
-                msg => { interactor.Poke(msg); return Task.CompletedTask; },
-                SaveConfigToDisk);
-
-            _queueRunner.Start();
-            _initialized = true;
-            logger.LogInformation("[BiliLearn] 初始化完成");
+                _queueRunner.Start();
+                _initialized = true;
+                logger.LogInformation("[BiliLearn] 初始化完成");
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "[BiliLearn] 初始化失败");
+            }
         }
     }
 
@@ -110,7 +129,10 @@ public class BiliLearnModule(
     public async Task<string> Learn([Description("B站视频BV号，如 BV1xx411c7mD")] string bvid)
     {
         EnsureInitialized();
-        return await _service!.LearnAsync(bvid);
+        logger.LogInformation("[BiliLearn] Learn called, bvid={Bvid}, _service is null: {IsNull}", bvid, _service == null);
+        if (_service == null)
+            return "❌ LearnService未初始化";
+        return await _service.LearnAsync(bvid);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -134,7 +156,21 @@ public class BiliLearnModule(
     public async Task<string> QueueStatus()
     {
         EnsureInitialized();
-        return await _service!.GetQueueStatusAsync();
+        logger.LogInformation("[BiliLearn] QueueStatus called, _service is null: {IsNull}, _queueRunner is null: {QueueNull}", _service == null, _queueRunner == null);
+        if (_service == null)
+            return "❌ LearnService未初始化";
+        try
+        {
+            var result = await _service.GetQueueStatusAsync();
+            logger.LogInformation("[BiliLearn] QueueStatus result: {Result}", result);
+            interactor.Poke(result);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "[BiliLearn] QueueStatus exception");
+            return $"❌ 获取队列状态异常: {ex.Message}";
+        }
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -142,7 +178,7 @@ public class BiliLearnModule(
     public async Task CheckLogin()
     {
         EnsureInitialized();
-        await _service!.CheckLoginAsync();
+        await _authService!.CheckLoginAsync();
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -150,7 +186,7 @@ public class BiliLearnModule(
     public async Task<string> SearchBiliVideo([Description("搜索关键词")] string keyword, [Description("返回结果数量，默认10")] int count = 10)
     {
         EnsureInitialized();
-        return await _service!.SearchBiliVideoAsync(keyword, count);
+        return await _searchService!.SearchBiliVideoAsync(keyword, count);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -158,7 +194,7 @@ public class BiliLearnModule(
     public async Task<string> QrVerify()
     {
         EnsureInitialized();
-        return await _service!.QrVerifyAsync();
+        return await _authService!.QrVerifyAsync();
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -166,7 +202,7 @@ public class BiliLearnModule(
     public async Task<string> Logout()
     {
         EnsureInitialized();
-        return await _service!.LogoutAsync();
+        return await _authService!.LogoutAsync();
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -174,7 +210,7 @@ public class BiliLearnModule(
     public async Task<string> CleanTemp()
     {
         EnsureInitialized();
-        return await _service!.CleanTempAsync();
+        return await _authService!.CleanTempAsync();
     }
 
     protected async void OnMessageReceived(string message)
