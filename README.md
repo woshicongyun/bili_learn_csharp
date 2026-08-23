@@ -31,7 +31,7 @@
 
 ---
 
-## 📦 当前版本：v4.2.0
+## 📦 当前版本：v4.4.0 (V2 纵切架构)
 
 ### 九大功能一览
 
@@ -88,23 +88,22 @@
 ## 🏗️ 技术架构
 
 ```
-BiliLearnModule.cs          # 入口：XML 函数暴露 + 配置声明（瘦身：只留路由 + Poke 转发）
-Bootstrapper.cs             # 服务装配（从 Module 抽出，集中注入依赖）
-BiliLearnService.cs         # 业务方法下沉（Learn/Cancel/Search/CheckLogin/QrVerify）
+BiliLearnModule.cs          # 入口：XML 函数暴露（瘦身：只留路由 + Poke 转发）
+Bootstrapper.cs             # 服务装配（集中注入依赖，注册各能力柱）
 ConfirmationService.cs      # 待确认 / 重学确认逻辑（去重征询）
-QueueRunner.cs              # 队列调度：预下载并行 + 分析串行，支持批量入队/取消/状态
 DownloadStage.cs            # 下载并行管理（SemaphoreSlim 控并发，默认2）
-Orchestrator/
-  VideoProcessingOrchestrator.cs  # 编排器：调度整条学习流水线
+
+Capabilities/               # ★ V2 纵切式：按能力竖切，自含 API+处理+状态+错误
+  Learn/                    #   学习流程：ILearnService/ILearnQueue（队列调度+状态机）
+  Analyze/                  #   三源解析+LLM整合+归档（AnalyzeService）
+  Search/                   #   B站搜索（WBI 签名）
+  Auth/                     #   登录/登出/清理（QrVerify/CheckLogin/Logout/CleanTemp）
+
+Shared/Models/              # 共享数据模型（VideoStatus/ProcessingResult 等）
 Services/
-  BilibiliApiService.cs    # B站API（含 WBI 签名搜索、conclusion 字幕源）
+  BilibiliApiService.cs    # B站API（WBI 签名搜索、conclusion 字幕源）
   OpenAICompatibleClient.cs# 通用 LLM 客户端
-Processors/
-  VisionProcessor.cs       # 视觉分析（抽帧 + QwenVL）
-  AudioProcessor.cs        # ASR 转写
-  SubtitleProcessor.cs     # 字幕解析（player/v2 + conclusion 三源互校）
-Models/                    # 数据模型（含 VideoStatus 队列状态模型）
-Domain/Interfaces/         # 接口抽象（IMediaAnalyzer 等）
+Domain/Interfaces/         # 接口抽象（ILLMService 等）
 Utils/
   FFmpegHelper.cs          # 视频处理工具
   QrCodeGenerator.cs       # 二维码生成（扫码登录）
@@ -182,6 +181,7 @@ knowledge/
 | v4.1.x | 2026-08-22 | 修复后台任务信号量、关键帧文案计算 |
 | **v4.2.0** | 2026-08-22 | **WBI 签名搜索 + 扫码登录 + 退出登录 + 清理临时文件，功能全补齐** |
 | **v4.3.0** | 2026-08-23 | **队列能力（预下载并行+分析串行+批量入队+状态查询）+ Module 瘦身解耦** |
+| **v4.4.0** | 2026-08-23 | **V2 纵切式架构（Lear/Analyze 柱落地）+ 清理旧代码 + 梗概推送** |
 
 ---
 
@@ -194,6 +194,8 @@ knowledge/
 3. git 不可依时用 GitHub REST API，先 GET 确认 sha 再 PUT
 4. 服务层现有能力要主动暴露为 XML 函数（主模块 ≠ 全部能力）
 5. B 站搜索接口必须带 WBI 签名，光加请求头不够
+6. 删文件前先 grep 查类型定义位置，避免连带删除（ProcessingResult 惨案）
+7. ContinueWith 的 Faulted 分支必须处理，否则异常被吞、队列卡死
 
 ---
 
