@@ -266,9 +266,7 @@ public class VideoProcessingOrchestrator : IDisposable
                 if (!string.IsNullOrEmpty(structured.FullText))
                     parts.Add(structured.FullText);
                 if (!string.IsNullOrEmpty(aiSummary))
-                    parts.Add($"
-【AI总结】
-{aiSummary}");
+                    parts.Add($"\n【AI总结】\n{aiSummary}");
                 if (!string.IsNullOrEmpty(aiOutline))
                 {
                     try
@@ -277,22 +275,19 @@ public class VideoProcessingOrchestrator : IDisposable
                         if (outline.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
                         {
                             var outlineText = new System.Text.StringBuilder();
-                            outlineText.Append("
-【AI分段摘要】");
+                            outlineText.Append("\n【AI分段摘要】");
                             foreach (var sec in outline.RootElement.EnumerateArray())
                             {
                                 var title = sec.TryGetProperty("title", out var t) ? t.GetString() : "";
                                 if (!string.IsNullOrEmpty(title))
-                                    outlineText.Append($"
-## {title}");
+                                    outlineText.Append($"\n## {title}");
                                 if (sec.TryGetProperty("key_point", out var kp) && kp.ValueKind == System.Text.Json.JsonValueKind.Array)
                                 {
                                     foreach (var point in kp.EnumerateArray())
                                     {
                                         var pc = point.TryGetProperty("content", out var pcv) ? pcv.GetString() : "";
                                         if (!string.IsNullOrEmpty(pc))
-                                            outlineText.Append($"
-- {pc}");
+                                            outlineText.Append($"\n- {pc}");
                                     }
                                 }
                             }
@@ -306,8 +301,7 @@ public class VideoProcessingOrchestrator : IDisposable
                     }
                 }
 
-                ctx.SubtitleText = string.Join("
-", parts);
+                ctx.SubtitleText = string.Join("\n", parts);
                 sourceStatus["subtitle"] = true;
                 await _progressReporter.ReportAsync($"✅ 字幕: {structured.Items.Count}条 / {ctx.SubtitleText.Length}字{(aiSummary != null ? " + AI总结" : "")}", ProgressLevel.LogOnly);
             }
