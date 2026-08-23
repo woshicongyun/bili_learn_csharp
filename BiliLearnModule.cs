@@ -1,9 +1,7 @@
+
 using System;
-using System.Collections.Concurrent;
-using System.Linq;
 using System.ComponentModel;
 using System.IO;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Alife.Foundation;
@@ -11,11 +9,6 @@ using Alife.Framework;
 using Alife.Function.AIModelUtility;
 using Alife.Function.FunctionCaller;
 using BiliLearn.CSharp.Plugin.Domain.Interfaces;
-using BiliLearn.CSharp.Plugin.Models;
-using BiliLearn.CSharp.Plugin.Orchestrator;
-using BiliLearn.CSharp.Plugin.Processors;
-using BiliLearn.CSharp.Plugin.Services;
-using BiliLearn.CSharp.Plugin.Utils;
 using Microsoft.Extensions.Logging;
 
 namespace BiliLearn.CSharp.Plugin;
@@ -61,16 +54,15 @@ public class BiliLearnModule(
     ChatBehaviour,
     IConfigurable<BiliLearnConfig>
 {
-    // 待确认状态字典
-    private IKnowledgeRepository? _knowledgeRepo;
-    private readonly ConcurrentDictionary<string, PendingConfirmation> PendingConfirmations = new();
-
-    private readonly Interactor<BiliLearnModule> _interactor = interactor;
-    private readonly ILanguageModel? _languageModel = languageModel;
     public BiliLearnConfig Configuration { get; set; } = new();
-    private VideoProcessingOrchestrator? _orchestrator;
-    private IProgressReporter? _progressReporter;
-    private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeTasks = new();
+
+    private BiliLearnService? _service;
+    private ConfirmationService? _confirmationService;
+    private QueueRunner? _queueRunner;
+    private IKnowledgeRepository? _knowledgeRepo;
+
+    private readonly object _initLock = new();
+    private bool _initialized = false;
 
     protected override async Task OnAwake()
     {
@@ -79,69 +71,37 @@ public class BiliLearnModule(
         await Task.CompletedTask;
     }
 
-    private readonly object _initLock = new();
-
     private void EnsureInitialized()
     {
-        if (_orchestrator != null) return;
+        if (_initialized) return;
         lock (_initLock)
         {
-            if (_orchestrator != null) return;
+            if (_initialized) return;
 
-            var cfg = Configuration ?? new BiliLearnConfig();
-            var workDir = string.IsNullOrEmpty(cfg.WorkDir)
-                ? Path.Combine(AlifePath.StorageFolderPath, "Plugins", "Alife.Plugin.BiliLearn")
-                : cfg.WorkDir;
-            Directory.CreateDirectory(workDir);
+            var services = Bootstrapper.Build(
+                Configuration, visionModel, audioRecognizerProvider,
+                languageModel, logger, interactor);
 
-            logger.LogInformation("[BiliLearn] 配置 - Cookie长度: {Len}, LLM Key长度: {KeyLen}, 模型: {Model}, BaseUrl: {BaseUrl}, 工作目录: {Dir}",
-                cfg.Cookie?.Length ?? 0, cfg.LlmApiKey?.Length ?? 0, cfg.LlmModel, cfg.LlmBaseUrl, workDir);
+            _queueRunner = services.QueueRunner;
+            _knowledgeRepo = services.KnowledgeRepo;
 
-            var biliApi = new BilibiliApiService(cfg.Cookie ?? "", logger);
-            var downloader = new MediaDownloader(logger);
-            var visionProcessor = new VisionProcessor(visionModel, logger);
-            logger.LogInformation("[BiliLearn] audioRecognizerProvider注入: {Provider}", audioRecognizerProvider == null ? "NULL ❌" : audioRecognizerProvider.GetType().Name);
-            var audioProcessor = new AudioProcessor(audioRecognizerProvider, logger);
-            var subtitleProcessor = new SubtitleProcessor(logger);
-            ILLMService llm;
-            if (cfg.UseAlifeLLM && _languageModel != null)
-            {
-                logger.LogInformation("[BiliLearn] 使用Alife内置语言模型");
-                llm = new AlifeLLMAdapter(_languageModel, logger);
-            }
-            else
-            {
-                if (cfg.UseAlifeLLM && _languageModel == null)
-                    logger.LogWarning("[BiliLearn] UseAlifeLLM=true 但未注入ILanguageModel，回退到OpenAI规范API");
-                else
-                    logger.LogInformation("[BiliLearn] 使用OpenAI规范API: {BaseUrl} 模型: {Model}", cfg.LlmBaseUrl, cfg.LlmModel);
-                llm = new OpenAICompatibleClient(cfg.LlmApiKey ?? "", logger, baseUrl: cfg.LlmBaseUrl, model: cfg.LlmModel);
-            }
-            var knowledgeBase = new KnowledgeBaseService(logger, workDir);
-            _knowledgeRepo = knowledgeBase;
-            
-            var llmIntegrator = new LLMIntegrator(llm, knowledgeBase, logger);
-            var progressReporter = _progressReporter = new BiliLearnProgressReporter(
+            // 先创建ConfirmationService（BiliLearnService依赖它）
+            _confirmationService = new ConfirmationService(
                 logger,
-                msg =>
-                {
-                    try
-                    {
-                        _interactor.Poke(msg);
-                        return Task.CompletedTask;
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "[BiliLearn] Poke 失败");
-                        return Task.CompletedTask;
-                    }
-                });
+                msg => { interactor.Poke(msg); return Task.CompletedTask; },
+                services.Orchestrator.ProcessAsync);
 
-            _orchestrator = new VideoProcessingOrchestrator(
-                biliApi, downloader, visionProcessor, audioProcessor,
-                subtitleProcessor, llmIntegrator, logger, workDir, Configuration, progressReporter);
+            _service = new BiliLearnService(
+                services,
+                _confirmationService,
+                Configuration,
+                logger,
+                msg => { interactor.Poke(msg); return Task.CompletedTask; },
+                SaveConfigToDisk);
 
-            logger.LogInformation("[BiliLearn] 初始化完成，工作目录: {Dir}", workDir);
+            _queueRunner.Start();
+            _initialized = true;
+            logger.LogInformation("[BiliLearn] 初始化完成");
         }
     }
 
@@ -149,76 +109,32 @@ public class BiliLearnModule(
     [Description("分析B站视频：输入BV号，自动获取视频信息、下载、提取关键帧、ASR转写、字幕解析，并生成结构化总结归档到知识库")]
     public async Task<string> Learn([Description("B站视频BV号，如 BV1xx411c7mD")] string bvid)
     {
-        // 检查是否已学习过该视频
         EnsureInitialized();
-        if (_orchestrator == null) return "插件未初始化";
-
-        var existingEntry = await _knowledgeRepo!.GetByBvidAsync(bvid);
-        if (existingEntry != null)
-        {
-            return await HandleExistingVideo(bvid, existingEntry);
-        }
-
-        if (_activeTasks.ContainsKey(bvid))
-            return $"⚠️ 该视频正在分析中，可先取消（CancelLearn）再重试";
-        
-        var cts = new CancellationTokenSource();
-        _activeTasks[bvid] = cts;
-        
-        _interactor.Poke($"🔍 开始分析 {bvid}...");
-        
-        _ = Task.Run(async () => {
-            try
-            {
-                var result = await _orchestrator.ProcessAsync(bvid, cts.Token);
-                if (cts.IsCancellationRequested)
-                {
-                    await _progressReporter!.ReportAsync($"🛑 已取消分析: {bvid}", ProgressLevel.LogAndPush);
-                    return;
-                }
-                if (result.Success)
-                {
-                    var src = result.SourceStatus;
-                    var msg = $"🎓 **学习完成！\n" +
-                        $"📺 **{result.Title}**\n" +
-                        $"🔗 链接：https://www.bilibili.com/video/{result.Bvid}\n" +
-                        $"🏷️ 分类：{result.Category}\n" +
-                        $"🔍 字幕 {(src.TryGetValue("subtitle", out bool s) && s ? "✅" : "❌")} | ASR {(src.TryGetValue("asr", out bool a) && a ? "✅" : "❌")} | 视觉 {(src.TryGetValue("visual", out bool v) && v ? "✅" : "❌")}\n" +
-                        $"📌 摘要：{result.Summary}";
-                    _interactor.Poke(msg);
-                }
-                else
-                    await _progressReporter!.ReportAsync($"❌ 失败: {result.Message}", ProgressLevel.LogAndPush);
-            }
-            catch (OperationCanceledException)
-            {
-                _interactor.Poke($"🛑 已取消分析: {bvid}");
-            }
-            catch (Exception ex)
-            {
-                _interactor.Poke($"❌ 异常: {ex.Message}");
-            }
-            finally
-            {
-                _activeTasks.TryRemove(bvid, out _);
-                cts.Dispose();
-            }
-        });
-        
-        return "✅ 已开始分析，进度实时推送中...";
+        return await _service!.LearnAsync(bvid);
     }
-    
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("批量分析B站视频：输入多个BV号（用逗号分隔），自动加入队列并行下载、串行分析")]
+    public async Task<string> LearnBatch([Description("多个B站视频BV号，用逗号分隔，如 BV1xx411c7mD,BV1yy222c8mF")] string bvids)
+    {
+        EnsureInitialized();
+        return await _service!.LearnBatchAsync(bvids);
+    }
+
     [XmlFunction(FunctionMode.OneShot)]
     [Description("取消正在进行的B站视频分析")]
     public async Task<string> CancelLearn([Description("B站视频BV号")] string bvid)
     {
-        if (_activeTasks.TryRemove(bvid, out var cts))
-        {
-            cts.Cancel();
-            _interactor.Poke($"🛑 正在取消: {bvid}");
-            return $"✅ 已发送取消信号: {bvid}";
-        }
-        return $"⚠️ 未找到正在进行的分析任务: {bvid}";
+        EnsureInitialized();
+        return await _service!.CancelLearnAsync(bvid);
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("获取当前B站学习队列的状态")]
+    public async Task<string> QueueStatus()
+    {
+        EnsureInitialized();
+        return await _service!.GetQueueStatusAsync();
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -226,12 +142,7 @@ public class BiliLearnModule(
     public async Task CheckLogin()
     {
         EnsureInitialized();
-        if (_orchestrator == null)
-        {
-            _interactor.Poke("❌ 插件未初始化");
-            return;
-        }
-        await _orchestrator.CheckLoginAsync();
+        await _service!.CheckLoginAsync();
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -239,26 +150,7 @@ public class BiliLearnModule(
     public async Task<string> SearchBiliVideo([Description("搜索关键词")] string keyword, [Description("返回结果数量，默认10")] int count = 10)
     {
         EnsureInitialized();
-        if (_orchestrator == null) return "插件未初始化";
-        try
-        {
-            var results = await _orchestrator.BiliApi.SearchVideosAsync(keyword, count);
-            if (results.Count == 0) return "未找到相关视频";
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"🔍 搜索 \"{keyword}\" 找到 {results.Count} 个视频：");
-            for (int i = 0; i < results.Count; i++)
-            {
-                var v = results[i];
-                sb.AppendLine($"{i + 1}. 【{v.Bvid}】{v.Title} - UP:{v.Author} | 播放:{v.PlayCount} | 时长:{v.Duration}");
-            }
-            _interactor.Poke(sb.ToString());
-            return sb.ToString();
-        }
-        catch (Exception ex)
-        {
-            _interactor.Poke($"❌ 搜索失败: {ex.Message}");
-            return $"❌ 搜索失败: {ex.Message}";
-        }
+        return await _service!.SearchBiliVideoAsync(keyword, count);
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -266,109 +158,15 @@ public class BiliLearnModule(
     public async Task<string> QrVerify()
     {
         EnsureInitialized();
-        if (_orchestrator == null) return "插件未初始化";
-
-        // 防止重复调用
-        if (_activeTasks.ContainsKey("qr_verify"))
-            return "⚠️ 已有扫码登录在等待中，请先完成或取消";
-
-        var qrInfo = await _orchestrator.BiliApi.GenerateQrCodeAsync();
-        if (!qrInfo.Success)
-            return $"❌ 生成二维码失败: {qrInfo.Message}";
-
-        var workDir = string.IsNullOrEmpty(Configuration.WorkDir)
-            ? Path.Combine(AlifePath.StorageFolderPath, "Plugins", "Alife.Plugin.BiliLearn")
-            : Configuration.WorkDir;
-        var qrDir = Path.Combine(workDir, "temp");
-        var qrPng = QrCodeGenerator.GeneratePng(qrInfo.QrCodeUrl, qrDir, logger);
-        var qrBase64 = Convert.ToBase64String(File.ReadAllBytes(qrPng));
-
-        // 自动打开二维码图片（C#调用系统图片查看器）
-        try
-        {
-            Process.Start(new ProcessStartInfo(qrPng) { UseShellExecute = true });
-            logger.LogInformation($"[BiliLearn] 已自动打开二维码: {qrPng}");
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning($"[BiliLearn] 自动打开二维码失败: {ex.Message}");
-        }
-
-        // Poke消息（含Base64便于聊天窗口查看）
-        _interactor.Poke($"📱 **请用B站APP扫码登录**\n\n![QR](data:image/png;base64,{qrBase64})\n\n二维码已自动打开，有效期2分钟！");
-
-        // 注册后台轮询任务，不阻塞当前调用
-        var cts = new CancellationTokenSource();
-        _activeTasks["qr_verify"] = cts;
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                var deadline = DateTime.Now.AddMinutes(2);
-                var lastStatus = -1;
-
-                while (DateTime.Now < deadline && !cts.IsCancellationRequested)
-                {
-                    await Task.Delay(3000);
-                    var poll = await _orchestrator.BiliApi.PollQrCodeStatusAsync(qrInfo.QrCodeKey);
-
-                    if (poll.Status == 1)
-                    {
-                        _interactor.Poke($"✅ 登录成功！欢迎 **{poll.UserName ?? "主人"}** (UID: {poll.Mid})！");
-                        if (!string.IsNullOrEmpty(poll.Cookie))
-                        {
-                            _orchestrator.BiliApi.SetCookie(poll.Cookie);
-                            Configuration.Cookie = poll.Cookie;
-                            SaveConfigToDisk();
-                            _interactor.Poke("✅ Cookie已持久化，重启后仍保持登录状态");
-                        }
-                        _activeTasks.TryRemove("qr_verify", out _);
-                        return;
-                    }
-                    if (poll.Status == 0 && lastStatus != 0)
-                    {
-                        _interactor.Poke("✅ 已扫码，请在手机上确认登录...");
-                        lastStatus = 0;
-                    }
-                    else if (poll.Status == 2)
-                    {
-                        _interactor.Poke("⚠️ 二维码已过期，请重新生成");
-                        _activeTasks.TryRemove("qr_verify", out _);
-                        return;
-                    }
-                }
-
-                _activeTasks.TryRemove("qr_verify", out _);
-                if (!cts.IsCancellationRequested)
-                    _interactor.Poke("⏰ 二维码已过期，请重试");
-            }
-            catch (Exception ex)
-            {
-                _activeTasks.TryRemove("qr_verify", out _);
-                _interactor.Poke($"❌ 登录过程异常: {ex.Message}");
-            }
-        }, cts.Token);
-
-        // 立即返回，不阻塞对话
-        return "二维码已生成并自动打开，等待扫码结果推送...";
+        return await _service!.QrVerifyAsync();
     }
 
-public async Task<string> Logout()
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("退出B站登录")]
+    public async Task<string> Logout()
     {
         EnsureInitialized();
-        if (_orchestrator == null) return "插件未初始化";
-        try
-        {
-            Configuration.Cookie = "";
-            SaveConfigToDisk();
-            _interactor.Poke("👋 已退出B站登录");
-            return "✅ 已退出登录";
-        }
-        catch (Exception ex)
-        {
-            return $"❌ 退出失败: {ex.Message}";
-        }
+        return await _service!.LogoutAsync();
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -376,90 +174,13 @@ public async Task<string> Logout()
     public async Task<string> CleanTemp()
     {
         EnsureInitialized();
-        if (_orchestrator == null) return "插件未初始化";
-        try
-        {
-            var workDir = string.IsNullOrEmpty(Configuration.WorkDir)
-                ? Path.Combine(AlifePath.StorageFolderPath, "Plugins", "Alife.Plugin.BiliLearn")
-                : Configuration.WorkDir;
-            var tempDir = Path.Combine(workDir, "temp");
-            if (!Directory.Exists(tempDir))
-                return "✅ 临时目录不存在，无需清理";
-
-            int deleted = 0;
-            foreach (var f in Directory.GetFiles(tempDir))
-            {
-                File.Delete(f);
-                deleted++;
-            }
-            foreach (var d in Directory.GetDirectories(tempDir))
-            {
-                Directory.Delete(d, true);
-                deleted++;
-            }
-            _interactor.Poke($"🧹 已清理 {deleted} 个临时文件");
-            return $"✅ 清理完成，删除 {deleted} 项";
-        }
-        catch (Exception ex)
-        {
-            return $"❌ 清理失败: {ex.Message}";
-        }
+        return await _service!.CleanTempAsync();
     }
 
-
-    public void Dispose()
-    {
-        _orchestrator?.Dispose();
-    }
-
-    // 处理已学习过的视频
-    private async Task<string> HandleExistingVideo(string bvid, KnowledgeEntry entry)
-    {
-        var pending = new PendingConfirmation
-        {
-            Bvid = bvid,
-            OldEntry = entry,
-            UserQuery = $"该视频已于 {entry.CreatedAt:yyyy-MM-dd HH:mm} 学习过。{Environment.NewLine}📝 摘要：{entry.Summary.Substring(0, Math.Min(150, entry.Summary.Length))}...{Environment.NewLine}🔗 链接：https://www.bilibili.com/video/{bvid}{Environment.NewLine}{Environment.NewLine}是否需要重新学习？回复yes重新学习，回复no取消。",
-            Timestamp = DateTime.Now
-        };
-        
-        PendingConfirmations[bvid] = pending;
-        _interactor.Poke($"📚 {pending.UserQuery}");
-        return "已学习过该视频，等待确认...";
-    }
-
-    // 处理用户消息，检测确认回复
     protected async void OnMessageReceived(string message)
     {
-        if (string.IsNullOrWhiteSpace(message)) return;
-        
-        var entries = PendingConfirmations.ToArray();
-        if (entries.Length == 0) return;
-        
-        var lowerMsg = message.ToLower().Trim();
-        var confirmPatterns = new[] { "是", "好的", "重新学习", "重新学", "学", "y", "yes" };
-        var denyPatterns = new[] { "否", "不用了", "取消", "不学", "n", "no" };
-        
-        foreach (var (bvid, pending) in entries)
-        {
-            if (confirmPatterns.Any(p => lowerMsg.Contains(p)))
-            {
-                _ = Task.Run(async () =>
-                {
-                    if (_progressReporter != null)
-                        await _progressReporter.ReportAsync($"✅ 开始重新学习: {bvid}", ProgressLevel.LogAndPush);
-                    if (_orchestrator != null)
-                        await _orchestrator.ProcessAsync(bvid, CancellationToken.None);
-                });
-                PendingConfirmations.TryRemove(bvid, out _);
-            }
-            else if (denyPatterns.Any(p => lowerMsg.Contains(p)))
-            {
-                if (_progressReporter != null)
-                    await _progressReporter.ReportAsync("已取消重新学习。", ProgressLevel.LogAndPush);
-                PendingConfirmations.TryRemove(bvid, out _);
-            }
-        }
+        EnsureInitialized();
+        await _confirmationService!.OnMessageReceivedAsync(message);
     }
 
     private void SaveConfigToDisk()
@@ -478,5 +199,11 @@ public async Task<string> Logout()
         {
             logger.LogWarning(ex, "[BiliLearn] 持久化配置到磁盘失败");
         }
+    }
+
+    public void Dispose()
+    {
+        _service?.Dispose();
+        _confirmationService?.Dispose();
     }
 }
