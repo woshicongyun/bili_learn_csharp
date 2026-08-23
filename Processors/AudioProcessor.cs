@@ -7,8 +7,6 @@ using Alife.Function.AIModelUtility;
 using BiliLearn.CSharp.Plugin.Domain.Interfaces;
 using BiliLearn.CSharp.Plugin.Models;
 using Microsoft.Extensions.Logging;
-using NAudio.Wave;
-using NAudio.Wave.SampleProviders;
 
 namespace BiliLearn.CSharp.Plugin.Processors;
 
@@ -17,6 +15,7 @@ namespace BiliLearn.CSharp.Plugin.Processors;
 /// </summary>
 public class AudioProcessor : IMediaAnalyzer
 {
+    private static readonly Type? _audioDecoderType = Type.GetType("Alife.Function.Auditory.AudioRecognitionService.AudioDecoder, Alife.Function.Auditory");
     private readonly IAudioRecognizerProvider? _provider;
     private readonly ILogger _logger;
 
@@ -89,18 +88,19 @@ public class AudioProcessor : IMediaAnalyzer
         try
         {
             ct.ThrowIfCancellationRequested();
-            using var reader = new AudioFileReader(path);
-            var mono = reader.ToMono();
-            var resampler = new WdlResamplingSampleProvider(mono, 16000);
-            var buffer = new List<float>();
-            var readBuffer = new float[16000];
-            int read;
-            while ((read = resampler.Read(readBuffer, 0, readBuffer.Length)) > 0)
+            if (_audioDecoderType == null)
             {
-                ct.ThrowIfCancellationRequested();
-                for (int i = 0; i < read; i++) buffer.Add(readBuffer[i]);
+                _logger.LogWarning("AudioDecoder类型不可用，请确认Auditory插件已加载");
+                return Array.Empty<float>();
             }
-            return buffer.ToArray();
+            var method = _audioDecoderType.GetMethod("DecodeFileTo16kMonoFloat", new[] { typeof(string) });
+            if (method == null)
+            {
+                _logger.LogWarning("AudioDecoder.DecodeFileTo16kMonoFloat方法不可用");
+                return Array.Empty<float>();
+            }
+            var result = method.Invoke(null, new object[] { path });
+            return result as float[] ?? Array.Empty<float>();
         }
         catch (Exception ex)
         {
