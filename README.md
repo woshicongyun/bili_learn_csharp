@@ -33,16 +33,18 @@
 
 ## 📦 当前版本：v4.2.0
 
-### 七大功能一览
+### 九大功能一览
 
 | 功能 | 说明 |
 |------|------|
-| 📚 **Learn** | 输入 BV 号自动完成视频分析 + 知识归档 |
-| 🚫 **CancelLearn** | 取消正在进行的分析任务 |
+| 📚 **Learn** | 输入 BV 号自动完成视频分析 + 知识归档（单视频学习） |
+| 📚 **LearnBatch** | 批量入队学习（预下载并行 + 分析串行） |
+| 🚫 **CancelLearn** | 取消分析任务（支持取消单个/全部队列） |
 | 🔍 **SearchBiliVideo** | 关键词搜索（含 **WBI 签名**，突破 B 站风控） |
 | 🔐 **CheckLogin** | 检查 B 站登录状态与账号信息 |
 | 📱 **QrVerify** | 扫码登录 B 站（自动生成二维码、轮询确认、持久化 Cookie） |
 | 🚪 **Logout** | 退出登录，销毁 Cookie |
+| 📊 **QueueStatus** | 查看队列状态（各视频阶段 + 汇总） |
 | 🧹 **CleanTemp** | 一键清理临时文件（视频/音频/关键帧缓存） |
 
 ### 配置项（全部可调，参数化优先）
@@ -86,17 +88,22 @@
 ## 🏗️ 技术架构
 
 ```
-BiliLearnModule.cs          # 入口：XML 函数暴露 + 配置声明
+BiliLearnModule.cs          # 入口：XML 函数暴露 + 配置声明（瘦身：只留路由 + Poke 转发）
+Bootstrapper.cs             # 服务装配（从 Module 抽出，集中注入依赖）
+BiliLearnService.cs         # 业务方法下沉（Learn/Cancel/Search/CheckLogin/QrVerify）
+ConfirmationService.cs      # 待确认 / 重学确认逻辑（去重征询）
+QueueRunner.cs              # 队列调度：预下载并行 + 分析串行，支持批量入队/取消/状态
+DownloadStage.cs            # 下载并行管理（SemaphoreSlim 控并发，默认2）
 Orchestrator/
   VideoProcessingOrchestrator.cs  # 编排器：调度整条学习流水线
 Services/
-  BilibiliApiService.cs    # B站API（含 WBI 签名搜索）
+  BilibiliApiService.cs    # B站API（含 WBI 签名搜索、conclusion 字幕源）
   OpenAICompatibleClient.cs# 通用 LLM 客户端
 Processors/
   VisionProcessor.cs       # 视觉分析（抽帧 + QwenVL）
   AudioProcessor.cs        # ASR 转写
-  SubtitleProcessor.cs     # 字幕解析
-Models/                    # 数据模型（干净无框架依赖）
+  SubtitleProcessor.cs     # 字幕解析（player/v2 + conclusion 三源互校）
+Models/                    # 数据模型（含 VideoStatus 队列状态模型）
 Domain/Interfaces/         # 接口抽象（IMediaAnalyzer 等）
 Utils/
   FFmpegHelper.cs          # 视频处理工具
@@ -160,6 +167,8 @@ knowledge/
 <qrverify />
 <logout />
 <cleantemp />
+<learnbatch bvids="BV1xx411c7mD,BV1yy222c8mF" />
+<queuestatus />
 ```
 
 ---
@@ -172,6 +181,7 @@ knowledge/
 | v4.1.0 | 2026-08-21 | 视频学习流水线完整跑通，三源解析上线 |
 | v4.1.x | 2026-08-22 | 修复后台任务信号量、关键帧文案计算 |
 | **v4.2.0** | 2026-08-22 | **WBI 签名搜索 + 扫码登录 + 退出登录 + 清理临时文件，功能全补齐** |
+| **v4.3.0** | 2026-08-23 | **队列能力（预下载并行+分析串行+批量入队+状态查询）+ Module 瘦身解耦** |
 
 ---
 
