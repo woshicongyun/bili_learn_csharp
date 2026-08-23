@@ -15,7 +15,6 @@ namespace BiliLearn.CSharp.Plugin.Processors;
 /// </summary>
 public class AudioProcessor : IMediaAnalyzer
 {
-    private static readonly Type? _audioDecoderType = Type.GetType("Alife.Function.Auditory.AudioRecognitionService.AudioDecoder, Alife.Function.Auditory");
     private readonly IAudioRecognizerProvider? _provider;
     private readonly ILogger _logger;
 
@@ -88,23 +87,48 @@ public class AudioProcessor : IMediaAnalyzer
         try
         {
             ct.ThrowIfCancellationRequested();
-            if (_audioDecoderType == null)
+
+            // 反射调用Alife内置AudioDecoder（避免引用NAudio导致全局冲突）
+            var audioDecoderType = Type.GetType("Alife.Function.Auditory.AudioDecoder, Alife.Function.Auditory");
+            if (audioDecoderType == null)
             {
-                _logger.LogWarning("AudioDecoder类型不可用，请确认Auditory插件已加载");
+                _logger.LogWarning("未找到Alife.AudioDecoder类型，尝试其他程序集");
+                audioDecoderType = AppDomain.CurrentDomain.GetAssemblies()
+                    .SelectMany(a => a.GetTypes())
+                    .FirstOrDefault(t => t.Name == "AudioDecoder" && t.Namespace != null && t.Namespace.Contains("Auditory"));
+            }
+
+            if (audioDecoderType == null)
+            {
+                _logger.LogWarning("Alife.AudioDecoder类型不存在，无法解码音频");
                 return Array.Empty<float>();
             }
-            var method = _audioDecoderType.GetMethod("DecodeFileTo16kMonoFloat", new[] { typeof(string) });
+
+            var method = audioDecoderType.GetMethod("DecodeFileTo16kMonoFloat",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+                null,
+                new[] { typeof(string) },
+                null);
+
             if (method == null)
             {
-                _logger.LogWarning("AudioDecoder.DecodeFileTo16kMonoFloat方法不可用");
+                _logger.LogWarning("Alife.AudioDecoder.DecodeFileTo16kMonoFloat方法不存在");
                 return Array.Empty<float>();
             }
+
             var result = method.Invoke(null, new object[] { path });
-            return result as float[] ?? Array.Empty<float>();
+            if (result is float[] samples)
+            {
+                _logger.LogInformation("✅ Alife解码: {Samples}采样 ({Sec:N1}秒)", samples.Length, samples.Length / 16000.0);
+                return samples;
+            }
+
+            _logger.LogWarning("Alife解码返回类型异常");
+            return Array.Empty<float>();
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "音频解码失败: {Path}", path);
+            _logger.LogWarning(ex, "音频解码失败(反射Alife.AudioDecoder): {Path}", path);
             return Array.Empty<float>();
         }
     }
