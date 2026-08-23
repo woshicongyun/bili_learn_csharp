@@ -27,31 +27,7 @@ public class SubtitleProcessor : IMediaAnalyzer
             var root = doc.RootElement;
             var items = new List<SubtitleItem>();
 
-            // 格式1: conclusion接口返回的 subtitle[].part_subtitle[] 结构
-            if (root.TryGetProperty("subtitle", out var subtitleArr) && subtitleArr.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var part in subtitleArr.EnumerateArray())
-                {
-                    if (!part.TryGetProperty("part_subtitle", out var partSubs) || partSubs.ValueKind != JsonValueKind.Array)
-                        continue;
-                    foreach (var sub in partSubs.EnumerateArray())
-                    {
-                        items.Add(new SubtitleItem
-                        {
-                            From = sub.TryGetProperty("start_timestamp", out var st) ? st.GetDouble() : 0,
-                            To = sub.TryGetProperty("end_timestamp", out var et) ? et.GetDouble() : 0,
-                            Text = sub.TryGetProperty("content", out var content) ? content.GetString() ?? "" : ""
-                        });
-                    }
-                }
-                if (items.Count > 0)
-                {
-                    _logger.LogInformation("✅ 字幕解析完成(conclusion格式): {Count}条", items.Count);
-                    return Task.FromResult(new List<StructuredSubtitle> { new StructuredSubtitle { Items = items } });
-                }
-            }
-
-            // 格式2: player/v2下载的字幕文件 body[] 结构
+            // 方式1: body[] 结构（player/v2 接口）
             if (root.TryGetProperty("body", out var body) && body.ValueKind == JsonValueKind.Array)
             {
                 foreach (var item in body.EnumerateArray())
@@ -60,15 +36,36 @@ public class SubtitleProcessor : IMediaAnalyzer
                     {
                         From = item.TryGetProperty("from", out var from) ? from.GetDouble() : 0,
                         To = item.TryGetProperty("to", out var to) ? to.GetDouble() : 0,
-                        Text = item.TryGetProperty("content", out var content) ? content.GetString() ?? "" : ""
+                        Text = item.TryGetProperty("content", out var c1) ? c1.GetString() ?? "" : ""
                     });
                 }
-                _logger.LogInformation("✅ 字幕解析完成(body格式): {Count}条", items.Count);
-                return Task.FromResult(new List<StructuredSubtitle> { new StructuredSubtitle { Items = items } });
+            }
+            // 方式2: subtitle[].part_subtitle[] 结构（conclusion 接口）
+            else if (root.TryGetProperty("subtitle", out var subtitle) && subtitle.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var part in subtitle.EnumerateArray())
+                {
+                    if (!part.TryGetProperty("part_subtitle", out var partSub) || partSub.ValueKind != JsonValueKind.Array)
+                        continue;
+                    foreach (var item in partSub.EnumerateArray())
+                    {
+                        items.Add(new SubtitleItem
+                        {
+                            From = item.TryGetProperty("start_timestamp", out var st) ? st.GetDouble() : 0,
+                            To = item.TryGetProperty("end_timestamp", out var et) ? et.GetDouble() : 0,
+                            Text = item.TryGetProperty("content", out var c2) ? c2.GetString() ?? "" : ""
+                        });
+                    }
+                }
+            }
+            else
+            {
+                _logger.LogInformation("字幕数据中没有可识别的结构");
+                return Task.FromResult(new List<StructuredSubtitle>());
             }
 
-            _logger.LogWarning("字幕解析失败: 未知JSON结构");
-            return Task.FromResult(new List<StructuredSubtitle>());
+            _logger.LogInformation("✅ 字幕解析完成: {Count}条", items.Count);
+            return Task.FromResult(new List<StructuredSubtitle> { new StructuredSubtitle { Items = items } });
         }
         catch (Exception ex)
         {
