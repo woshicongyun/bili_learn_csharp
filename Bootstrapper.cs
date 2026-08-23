@@ -6,8 +6,9 @@ using Alife.Framework;
 using Alife.Function.AIModelUtility;
 using BiliLearn.CSharp.Plugin.Domain.Interfaces;
 using BiliLearn.CSharp.Plugin.Models;
-using BiliLearn.CSharp.Plugin.Orchestrator;
 using BiliLearn.CSharp.Plugin.Processors;
+using BiliLearn.CSharp.Plugin.Capabilities.Analyze;
+using BiliLearn.CSharp.Plugin.Capabilities.Learn;
 using BiliLearn.CSharp.Plugin.Services;
 using Microsoft.Extensions.Logging;
 
@@ -19,7 +20,7 @@ namespace BiliLearn.CSharp.Plugin;
 public static class Bootstrapper
 {
     /// <summary>
-    /// 构建所有核心服务，返回一个包含 Orchestrator 和 QueueRunner 的容器
+    /// 构建所有核心服务，返回服务容器
     /// </summary>
     public static BiliLearnServices Build(
         BiliLearnConfig config,
@@ -78,27 +79,50 @@ public static class Bootstrapper
                 }
             });
 
-        // 6. 编排器
-        var orchestrator = new VideoProcessingOrchestrator(
+        // 6. 分析服务（Analyze柱）
+        var analyzeService = new AnalyzeService(
             biliApi, downloader, visionProcessor, audioProcessor,
             subtitleProcessor, llmIntegrator, logger, workDir, cfg, progressReporter);
 
         // 7. 队列组件
         var downloadStage = new DownloadStage(biliApi, downloader, logger, workDir, 2);
-        var queueRunner = new QueueRunner(
-            downloadStage,
+
+        // 8. 确认服务（LearnService依赖）
+        var confirmation = new ConfirmationService(
             logger,
-            orchestrator.ProcessAsync,
+            msg => { interactor.Poke(msg); return System.Threading.Tasks.Task.CompletedTask; },
+            analyzeService.ProcessAsync);
+
+        // 9. 队列组件
+        var learnQueue = new LearnQueue(
+            downloadStage, logger, analyzeService.ProcessAsync,
+            msg => { interactor.Poke(msg); return System.Threading.Tasks.Task.CompletedTask; });
+
+        learnQueue.Start();
+
+        // 10. Learn柱：学习流程（必须在队列创建后，确保services完整）
+        var learnService = new LearnService(
+            new BiliLearnServices
+            {
+                AnalyzeService = analyzeService,
+                BiliApi = biliApi,
+                KnowledgeRepo = knowledgeBase,
+                ProgressReporter = progressReporter,
+                WorkDir = workDir,
+                LearnService = null!,
+                LearnQueue = learnQueue
+            }, confirmation, logger,
             msg => { interactor.Poke(msg); return System.Threading.Tasks.Task.CompletedTask; });
 
         return new BiliLearnServices
         {
-            Orchestrator = orchestrator,
-            QueueRunner = queueRunner,
+            AnalyzeService = analyzeService,
             BiliApi = biliApi,
             KnowledgeRepo = knowledgeBase,
             ProgressReporter = progressReporter,
-            WorkDir = workDir
+            WorkDir = workDir,
+            LearnService = learnService,
+            LearnQueue = learnQueue
         };
     }
 }
@@ -106,10 +130,11 @@ public static class Bootstrapper
 /// <summary>Bootstrapper 返回的容器</summary>
 public class BiliLearnServices
 {
-    public required VideoProcessingOrchestrator Orchestrator { get; init; }
-    public required QueueRunner QueueRunner { get; init; }
+    public required IAnalyzeService AnalyzeService { get; init; }
     public required IBilibiliFetcher BiliApi { get; init; }
     public required IKnowledgeRepository KnowledgeRepo { get; init; }
     public required IProgressReporter ProgressReporter { get; init; }
     public required string WorkDir { get; init; }
+    public required LearnService LearnService { get; init; }
+    public required LearnQueue LearnQueue { get; init; }
 }
