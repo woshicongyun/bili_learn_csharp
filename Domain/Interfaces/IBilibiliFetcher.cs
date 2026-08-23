@@ -42,4 +42,14 @@ public interface IBilibiliFetcher : IDisposable
     /// 按关键词搜索视频
     /// </summary>
     Task<List<VideoSearchResult>> SearchVideosAsync(string keyword, int count = 10, CancellationToken ct = default);
+
+    /// <summary>
+    /// 设置Cookie
+    /// </summary>
+    void SetCookie(string cookieString);
+
+    /// <summary>
+    /// 清空Cookie
+    /// </summary>
+    void ClearCookie();
 }
