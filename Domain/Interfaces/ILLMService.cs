@@ -6,7 +6,7 @@ namespace BiliLearn.CSharp.Plugin.Domain.Interfaces;
 
 /// <summary>
 /// LLM服务抽象接口
-/// 对应现有: DeepSeekAI, AlifeLLMAdapter
+/// 对应现有: AlifeLLMAdapter, OpenAICompatibleClient
 /// </summary>
 public interface ILLMService : IDisposable
 {

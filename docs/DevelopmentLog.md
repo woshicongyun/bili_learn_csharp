@@ -1,40 +1,93 @@
 
-## 2026-08-23 20:38 V1 队列改造完成：预下载并行 + 分析串行 + Module 瘦身
+# BiliLearn 插件开发日志
 
-**背景**：按 `docs/Queue-Design.md`（v4）方案，为 BiliLearn 加入队列能力，并给 `BiliLearnModule.cs` 瘦身解耦。
+**作者**: Agens小帮手（搭载Alife框架的桌宠助手）
+**日期**: 2026-08-23
 
-**实施内容**（对应任务书 `docs/V1-Refactor-Task.md` 七步）：
-- 新增 `Models/VideoStatus.cs`：视频生命周期状态模型（Queued/Downloading/Downloaded/Analyzing/Completed/Failed/Canceled）
-- 新增 `DownloadStage.cs`：下载并行管理，SemaphoreSlim 控并发（默认2）
-- 新增 `QueueRunner.cs`：队列调度（入队/出队/取消/状态），分析串行（信号量）
-- 新增 `Bootstrapper.cs`：服务装配，从 Module 的 EnsureInitialized 抽出
-- 新增 `BiliLearnService.cs`：业务方法下沉（Learn/Cancel/Search/CheckLogin/QrVerify 等）
-- 新增 `ConfirmationService.cs`：待确认/重学确认逻辑独立
-- 修改 `BiliLearnModule.cs`：瘦身，只留路由 + Poke 转发；接入队列；新增 LearnBatch / QueueStatus
+## 2026-08-23 V1队列化重构完成 & 问题排查
 
-**推送与验证**：
-- 本地 git 曾遇 HTTP 401，改用 GitHub REST API 推送成功（提交 `d634594`，7 个文件）
-- 推送前已重载插件环境，`CheckLogin` 正常 → 编译通过、功能未破坏
+### 已完成工作
+1. **V1队列化重构**：将BiliLearn模块重构成六步架构
+   - DownloadStage.cs：控制下载并发（默认2）
+   - LearnQueue.cs：队列调度核心（上限5、批量入队、取消）
+   - Bootstrapper.cs：服务装配器
+   - LearnService.cs：业务方法下沉
+   - ConfirmationService.cs：分离确认逻辑
+   - BiliLearnModule.cs：轻量路由，保持XML接口不变
 
-**沉淀**：
-1. 本地 git remote token 失效时，GitHub REST API 的 `/git/blobs` → `/git/trees` → `/git/commits` → `/git/refs` 链路可完整替代提交
-2. 步骤化重构（每步编译验证）对弱模型执行者很重要，写成任务书可大幅降低跑偏风险
-3. 设计先行：先对齐队列调度与纵切式架构，再动手改造，产出更稳
+2. **修复编译错误**
+   - Poke方法的Task返回类型问题
+   - 命名空间引用缺失
+   - 类重复定义
+
+3. **修复队列状态不显示标题问题**
+   - 原因：LearnAsync直接入队，未先获取视频标题
+   - 修复：先调用GetVideoInfoAsync获取标题再入队
+   - 路径：`info?.Data?.Title`（注意VideoInfoResult.Data包装层）
+
+4. **修复队列循环不启动问题**
+   - 原因：Bootstrapper缺少`learnQueue.Start()`调用
+   - 修复：在Bootstrapper中添加`learnQueue.Start()`
+
+### 当前问题：后台日志无输出
+
+**现象**：
+- 队列状态显示"排队中"但后台无下载/分析日志
+- pet.log为空（0行）
+- Alife.DeskPet.Client.exe进程不存在
+
+**定位**：
+- LearnQueue.cs代码逻辑正确，有ILogger注入
+- LoopAsync方法有`_logger.LogInformation("[LearnQueue] 队列循环已启动")`
+- 但进程已退出，导致日志无输出
+
+**根因**：
+- Alife主程序已崩溃或退出
+- 插件重载命令执行成功但实际未生效（热编译缓存问题）
+
+**解决方案**：
+- 重启Alife主程序（skill经验："重启Alife是热编译终极解药"）
+- 重启后重新测试队列功能
+
+### 经验沉淀
+1. **队列/循环类必须显式调用Start()**才能激活后台任务
+2. **Alife框架中函数返回值≠AI可见输出**，必须显式Poke
+3. **热编译问题**：reload_plugin可能不够，需重启Alife
+4. **路径访问注意**：VideoInfoResult.Data.Title而非直接.Title
+5. **日志调试**：检查进程是否存在，pet.log是否为空
+
+### 待办
+- [ ] 重启Alife后验证队列功能
+- [ ] 推送代码到GitHub（Token 401问题待解决）
+- [ ] 知识库路径统一问题排查
+
 
 ---
-## 2026-08-23 16:33 BiliLearn 视频直读功能：显存风险教训
 
-**背景**：曾尝试为BiliLearn引入“视频直读”能力，让Qwen2.5-VL直接输入视频而非逐帧分析。
+## 2026-08-23 · V2 纵切式架构改造 + 队列/梗概推送完善
 
-**方案评估**：
-- 方案A：改Alife源码（`Alife.Function.AIModelUtility`）扩充 `IVisionModel` 接口 → 破坏框架纯净，不可取
-- 方案B：在BiliLearn内部定义 `IVideoVisionModel` 接口 + 反射探测 → 合理，但受限于Alife接口约束
-- 方案C：独立 `PythonPipeProcess` 拉起第二份Qwen模型 → 实测把12GB显存撑爆！
+### 版本：v4.4.0
 
-**关键教训**：
-1. **单独在BiliLearn插件里 new 独立的QwenPython 进程 = 模型加载两份 = 显存翻倍**，RTX 4070 12GB 直接爆掉
-2. 验证新能力前，**先确认显存余量**（nvidia-smi），尤其是涉及模型重载的操作
-3. 已验证：Qwen底层Python代码已支持视频通道（已导入 `process_vision_info`、processor 接收 `videos=` 参数），但 **`IVisionModel` 接口只暴露 `QueryAsync(imagePath, ...)`**，无法直传视频路径
-4. **结论**：当前架构下“视频直读”不可行，**采用逐帧fallback方案兜底**——每帧按图片分析，仅复用Alife已加载的模型实例，显存安全
+### 架构演进：V2 纵切式（按能力竖切）
+- 从 V1 横向三层（Module→Service→Processor）升级为纵切能力竖柱：
+  Capabilities/{Learn,Search,Auth,Analyze} + Shared/Models
+- 每根柱子自含 API + 处理逻辑 + 状态定义 + 错误处理，互不越界
 
-**沉淀**：增加新能力前，先做小范围可行性验证，尤其涉及模型重载时优先复用已加载实例，且不要一开始就改原项目结构。
+### Lear 柱（最难，真央亲自操刀）
+- 新增 ILearnService/ILearnQueue 接口 + LearnService/LearnQueue 实现
+- 完整迁绑 V1 BiliLearnService + QueueRunner（预下载并行+分析串行）
+- 自绘 PokeStatus 状态推送（Queued→Downloading→Downloaded→Analyzing→Completed）
+
+### Analyze 柱（弱模型按任务书实施）
+- 小A 按 V2-S3-Analyze-Task.md 完成 AnalyzeService 拆分
+- 旧 Orchestrator/DeepSeekAI/IProgressReporter_old 移入 _disabled，审查后批准退休
+
+### 清理旧代码（老家伙们退休）
+- 删除 _disabled/ 三个旧文件，重建 Models/ProcessingResult.cs
+- 清理5处 using Or 残留。教训：删文件先 grep 查类型定义
+
+### 修复 ContinueWith 吞异常
+- 加 IsFaulted 分支，GetBaseException 取真实异常+移除队列+记日志
+
+### 学习完成推送梗概
+- 分析完成推送补上梗概内容，学习真正落地到用户眼前
