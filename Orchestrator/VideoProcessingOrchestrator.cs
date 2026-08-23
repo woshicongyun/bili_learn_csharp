@@ -226,7 +226,29 @@ public class VideoProcessingOrchestrator : IDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
             await _progressReporter.ReportAsync("📝 获取字幕...", ProgressLevel.LogOnly);
-            var subtitleJson = await _biliApi.GetSubtitleAsync(ctx.Bvid, ctx.Cid, cancellationToken);
+
+            // 优先尝试conclusion接口（AI总结+字幕）
+            string? subtitleJson = null;
+            string? aiSummary = null;
+            string? aiOutline = null;
+            try
+            {
+                var conclusion = await _biliApi.GetSubtitleFromConclusionAsync(ctx.Bvid, cancellationToken);
+                subtitleJson = conclusion.SubtitleJson;
+                aiSummary = conclusion.Summary;
+                aiOutline = conclusion.OutlineJson;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "conclusion接口调用失败，回退到player/v2");
+            }
+
+            // fallback: player/v2接口
+            if (string.IsNullOrEmpty(subtitleJson))
+            {
+                subtitleJson = await _biliApi.GetSubtitleAsync(ctx.Bvid, ctx.Cid, cancellationToken);
+            }
+
             if (string.IsNullOrEmpty(subtitleJson))
             {
                 await _progressReporter.ReportAsync("⚠️ 无字幕", ProgressLevel.LogAndPush);
@@ -238,9 +260,56 @@ public class VideoProcessingOrchestrator : IDisposable
             {
                 var structured = structuredList[0];
                 ctx.SubtitleItems = structured.Items;
-                ctx.SubtitleText = structured.FullText;
+
+                // 如果有AI总结，附加到字幕文本增强上下文
+                var parts = new List<string>();
+                if (!string.IsNullOrEmpty(structured.FullText))
+                    parts.Add(structured.FullText);
+                if (!string.IsNullOrEmpty(aiSummary))
+                    parts.Add($"
+【AI总结】
+{aiSummary}");
+                if (!string.IsNullOrEmpty(aiOutline))
+                {
+                    try
+                    {
+                        var outline = System.Text.Json.JsonDocument.Parse(aiOutline);
+                        if (outline.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        {
+                            var outlineText = new System.Text.StringBuilder();
+                            outlineText.Append("
+【AI分段摘要】");
+                            foreach (var sec in outline.RootElement.EnumerateArray())
+                            {
+                                var title = sec.TryGetProperty("title", out var t) ? t.GetString() : "";
+                                if (!string.IsNullOrEmpty(title))
+                                    outlineText.Append($"
+## {title}");
+                                if (sec.TryGetProperty("key_point", out var kp) && kp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                                {
+                                    foreach (var point in kp.EnumerateArray())
+                                    {
+                                        var pc = point.TryGetProperty("content", out var pcv) ? pcv.GetString() : "";
+                                        if (!string.IsNullOrEmpty(pc))
+                                            outlineText.Append($"
+- {pc}");
+                                    }
+                                }
+                            }
+                            if (outlineText.Length > 0)
+                                parts.Add(outlineText.ToString());
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "outline解析失败，忽略AI分段摘要");
+                    }
+                }
+
+                ctx.SubtitleText = string.Join("
+", parts);
                 sourceStatus["subtitle"] = true;
-                await _progressReporter.ReportAsync($"✅ 字幕: {structured.Items.Count}条 / {ctx.SubtitleText.Length}字", ProgressLevel.LogOnly);
+                await _progressReporter.ReportAsync($"✅ 字幕: {structured.Items.Count}条 / {ctx.SubtitleText.Length}字{(aiSummary != null ? " + AI总结" : "")}", ProgressLevel.LogOnly);
             }
             else
             {
