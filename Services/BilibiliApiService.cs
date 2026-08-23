@@ -17,24 +17,32 @@ namespace BiliLearn.CSharp.Plugin.Services;
 public class BilibiliApiService : IBilibiliFetcher, IDisposable
 {
     private const string BaseUrl = "https://api.bilibili.com";
+    private const string ApiConclusion = "/x/web-interface/view/conclusion/get";
+    private const string ApiVideoInfo = "/x/web-interface/view";
     private readonly HttpClient _httpClient;
+    private readonly HttpClientHandler _handler;
     private readonly ILogger _logger;
     private bool _disposed = false;
 
     public BilibiliApiService(string cookieString, ILogger logger)
     {
         _logger = logger;
-        var handler = new HttpClientHandler
+        _handler = new HttpClientHandler
         {
             UseCookies = true,
             CookieContainer = new System.Net.CookieContainer()
         };
-        _httpClient = new HttpClient(handler);
+        _httpClient = new HttpClient(_handler);
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
         _httpClient.DefaultRequestHeaders.Add("Referer", "https://www.bilibili.com/");
         _httpClient.DefaultRequestHeaders.Add("Accept", "application/json, text/plain, */*");
         _httpClient.DefaultRequestHeaders.Add("Accept-Language", "zh-CN,zh;q=0.9");
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
+        
+        // 添加buvid设备标识（绕过风控）
+        _handler.CookieContainer.Add(new System.Net.Cookie("buvid4", "9FA7348A-EDA9-6D5E-E17E-CC70FD3A938936099infoc", "/", ".bilibili.com"));
+        _handler.CookieContainer.Add(new System.Net.Cookie("buvid3", "D338BEE7-B0DA-DCAB-D617-3EBD8A1992F046126infoc", "/", ".bilibili.com"));
+        _handler.CookieContainer.Add(new System.Net.Cookie("b_nut", "1787451146", "/", ".bilibili.com"));
         
         if (!string.IsNullOrEmpty(cookieString))
         {
@@ -45,10 +53,32 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
                 {
                     var name = part[..idx].Trim();
                     var value = part[(idx + 1)..].Trim();
-                    handler.CookieContainer.Add(new System.Net.Cookie(name, value, "/", ".bilibili.com"));
+                    _handler.CookieContainer.Add(new System.Net.Cookie(name, value, "/", ".bilibili.com"));
                 }
             }
         }
+    }
+
+    public void SetCookie(string cookieString)
+    {
+        if (string.IsNullOrEmpty(cookieString)) return;
+        foreach (var part in cookieString.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var idx = part.IndexOf('=');
+            if (idx > 0)
+            {
+                var name = part[..idx].Trim();
+                var value = part[(idx + 1)..].Trim();
+                _handler.CookieContainer.Add(new System.Net.Cookie(name, value, "/", ".bilibili.com"));
+            }
+        }
+        _logger.LogInformation("SetCookie: 已更新 {Count} 个Cookie", cookieString.Split(';').Length);
+    }
+
+    public void ClearCookie()
+    {
+        _handler.CookieContainer = new System.Net.CookieContainer();
+        _logger.LogInformation("ClearCookie: 已清空所有Cookie");
     }
 
 
@@ -365,10 +395,129 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
         }
     }
 
+    /// <summary>
+    /// 从B站AI总结接口获取字幕（一步到位，优先使用）
+    /// </summary>
+    public async Task<string?> GetSubtitleFromConclusionAsync(string bvid, long cid, CancellationToken ct = default)
+    {
+        try
+        {
+            // 先获取视频信息拿 aid 和 up_mid
+            var infoResp = await _httpClient.GetStringAsync($"{BaseUrl}{ApiVideoInfo}?bvid={bvid}", ct);
+            var infoData = JObject.Parse(infoResp);
+            if (infoData["code"]?.Value<int>() != 0)
+            {
+                _logger.LogWarning("conclusion获取视频信息失败: {Bvid}", bvid);
+                return null;
+            }
+            var aid = infoData["data"]?["aid"]?.Value<long>() ?? 0;
+            var upMid = infoData["data"]?["owner"]?["mid"]?.Value<long>() ?? 0;
+            if (aid == 0 || upMid == 0)
+            {
+                _logger.LogWarning("conclusion无法获取aid/up_mid: {Bvid}", bvid);
+                return null;
+            }
+
+            // WBI签名
+            var mixinKey = await GetMixinKeyAsync(ct);
+            var parameters = new Dictionary<string, string>
+            {
+                ["aid"] = aid.ToString(),
+                ["cid"] = cid.ToString(),
+                ["up_mid"] = upMid.ToString(),
+                ["wts"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString()
+            };
+            var wRid = SignParams(parameters, mixinKey);
+            parameters["w_rid"] = wRid;
+            var url = $"{BaseUrl}{ApiConclusion}?" + string.Join("&", parameters.Select(kv => $"{kv.Key}={Uri.EscapeDataString(kv.Value)}"));
+            
+            var response = await _httpClient.GetStringAsync(url, ct);
+            var data = JObject.Parse(response);
+            if (data["code"]?.Value<int>() != 0)
+            {
+                _logger.LogWarning("conclusion接口失败: {Message}", data["message"]?.Value<string>() ?? "未知错误");
+                return null;
+            }
+
+            var modelResult = data["data"]?["model_result"];
+            if (modelResult == null)
+            {
+                _logger.LogInformation("conclusion无model_result: {Bvid}", bvid);
+                return null;
+            }
+
+            // 解析 subtitle[].part_subtitle[]
+            var subtitle = modelResult["subtitle"];
+            if (subtitle == null || !subtitle.HasValues)
+            {
+                _logger.LogInformation("conclusion无字幕数据: {Bvid}", bvid);
+                return null;
+            }
+
+            var items = new List<string>();
+            foreach (var part in subtitle)
+            {
+                var partSubtitles = part["part_subtitle"];
+                if (partSubtitles == null || !partSubtitles.HasValues) continue;
+                foreach (var sub in partSubtitles)
+                {
+                    var content = sub["content"]?.Value<string>();
+                    if (!string.IsNullOrEmpty(content))
+                        items.Add(content);
+                }
+            }
+
+            if (items.Count == 0)
+            {
+                _logger.LogInformation("conclusion字幕为空: {Bvid}", bvid);
+                return null;
+            }
+
+            // 拼装字幕JSON（兼容SubtitleProcessor的body[]格式）
+            var bodyArray = new JArray();
+            double lastFrom = 0;
+            foreach (var part in subtitle)
+            {
+                var partSubtitles = part["part_subtitle"];
+                if (partSubtitles == null || !partSubtitles.HasValues) continue;
+                foreach (var sub in partSubtitles)
+                {
+                    var text = sub["content"]?.Value<string>() ?? "";
+                    if (string.IsNullOrEmpty(text)) continue;
+                    bodyArray.Add(new JObject
+                    {
+                        ["from"] = sub["start_timestamp"]?.Value<double>() ?? lastFrom,
+                        ["to"] = sub["end_timestamp"]?.Value<double>() ?? lastFrom + 1,
+                        ["content"] = text
+                    });
+                    lastFrom = sub["end_timestamp"]?.Value<double>() ?? lastFrom + 1;
+                }
+            }
+
+            var result = new JObject { ["body"] = bodyArray };
+            _logger.LogInformation("成功从conclusion获取字幕: {Bvid} ({Count}条)", bvid, bodyArray.Count);
+            return result.ToString();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "conclusion获取字幕失败: {Bvid} {Cid}", bvid, cid);
+            return null;
+        }
+    }
+
     public async Task<string?> GetSubtitleAsync(string bvid, long cid, CancellationToken ct = default)
     {
         try
         {
+            // 优先走conclusion接口（一步拿到字幕）
+            var conclusionSubtitle = await GetSubtitleFromConclusionAsync(bvid, cid, ct);
+            if (!string.IsNullOrEmpty(conclusionSubtitle))
+            {
+                _logger.LogInformation("使用conclusion接口获取字幕: {Bvid}", bvid);
+                return conclusionSubtitle;
+            }
+
+            // fallback到player/v2
             var response = await _httpClient.GetStringAsync($"{BaseUrl}/x/player/wbi/v2?bvid={bvid}&cid={cid}", ct);
             var data = JObject.Parse(response);
             
@@ -459,7 +608,11 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
 
     private string SignParams(Dictionary<string, string> parameters, string mixinKey)
     {
-        var sorted = parameters.OrderBy(kv => kv.Key).ToDictionary(kv => kv.Key, kv => kv.Value);
+        // 过滤参数值中的特殊字符（B站WBI签名要求）
+        var filtered = parameters.ToDictionary(
+            kv => kv.Key,
+            kv => System.Text.RegularExpressions.Regex.Replace(kv.Value ?? "", "[!'()*]", ""));
+        var sorted = filtered.OrderBy(kv => kv.Key).ToDictionary(kv => kv.Key, kv => kv.Value);
         var query = string.Join("&", sorted.Select(kv => $"{kv.Key}={Uri.EscapeDataString(kv.Value)}"));
         _logger.LogInformation("WBI待签名: {Query}", query);
         using var md5 = System.Security.Cryptography.MD5.Create();
@@ -485,7 +638,9 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
             parameters["w_rid"] = wRid;
             var url = $"{BaseUrl}/x/web-interface/search/type?" + string.Join("&", parameters.Select(kv => $"{kv.Key}={Uri.EscapeDataString(kv.Value)}"));
             _logger.LogInformation("搜索视频(带WBI签名): {Url}", url);
+            _httpClient.DefaultRequestHeaders.Referrer = new Uri("https://search.bilibili.com/");
             var response = await _httpClient.GetStringAsync(url, ct);
+            _httpClient.DefaultRequestHeaders.Referrer = new Uri("https://www.bilibili.com/");
             var data = JObject.Parse(response);
 
             if (data["code"]?.Value<int>() != 0)
