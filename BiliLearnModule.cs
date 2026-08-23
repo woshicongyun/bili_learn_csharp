@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Linq;
 using System.ComponentModel;
 using System.IO;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Alife.Foundation;
@@ -250,10 +251,12 @@ public class BiliLearnModule(
                 var v = results[i];
                 sb.AppendLine($"{i + 1}. 【{v.Bvid}】{v.Title} - UP:{v.Author} | 播放:{v.PlayCount} | 时长:{v.Duration}");
             }
+            _interactor.Poke(sb.ToString());
             return sb.ToString();
         }
         catch (Exception ex)
         {
+            _interactor.Poke($"❌ 搜索失败: {ex.Message}");
             return $"❌ 搜索失败: {ex.Message}";
         }
     }
@@ -264,56 +267,101 @@ public class BiliLearnModule(
     {
         EnsureInitialized();
         if (_orchestrator == null) return "插件未初始化";
+
+        // 防止重复调用
+        if (_activeTasks.ContainsKey("qr_verify"))
+            return "⚠️ 已有扫码登录在等待中，请先完成或取消";
+
         var qrInfo = await _orchestrator.BiliApi.GenerateQrCodeAsync();
         if (!qrInfo.Success)
             return $"❌ 生成二维码失败: {qrInfo.Message}";
 
         var workDir = string.IsNullOrEmpty(Configuration.WorkDir)
-                ? Path.Combine(AlifePath.StorageFolderPath, "Plugins", "Alife.Plugin.BiliLearn")
-                : Configuration.WorkDir;
-            var qrDir = Path.Combine(workDir, "temp");
-            var qrPng = QrCodeGenerator.GeneratePng(qrInfo.QrCodeUrl, qrDir, logger);
-            var qrBase64 = Convert.ToBase64String(File.ReadAllBytes(qrPng));
-        _interactor.Poke($"📱 **请用B站APP扫码登录**\n\n![QR](data:image/png;base64,{qrBase64})\n\n二维码有效期2分钟，请尽快扫码！");
+            ? Path.Combine(AlifePath.StorageFolderPath, "Plugins", "Alife.Plugin.BiliLearn")
+            : Configuration.WorkDir;
+        var qrDir = Path.Combine(workDir, "temp");
+        var qrPng = QrCodeGenerator.GeneratePng(qrInfo.QrCodeUrl, qrDir, logger);
+        var qrBase64 = Convert.ToBase64String(File.ReadAllBytes(qrPng));
 
+        // 自动打开二维码图片（C#调用系统图片查看器）
         try
         {
-            var deadline = DateTime.Now.AddMinutes(2);
-            while (DateTime.Now < deadline)
-            {
-                await Task.Delay(3000);
-                var poll = await _orchestrator.BiliApi.PollQrCodeStatusAsync(qrInfo.QrCodeKey);
-                if (poll.Status == 1)
-                {
-                    _interactor.Poke($"✅ 登录成功！欢迎 **{poll.UserName ?? "主人"}** (UID: {poll.Mid})！");
-                    return $"✅ 登录成功: {poll.UserName ?? "未知"} (UID: {poll.Mid})";
-                }
-                if (poll.Status == 0)
-                {
-                    _interactor.Poke("✅ 已扫码，请在手机上确认登录...");
-                }
-                else if (poll.Status == 2)
-                {
-                    return "⚠️ 二维码已过期，请重新生成";
-                }
-            }
-            return "⏰ 二维码已过期，请重试";
+            Process.Start(new ProcessStartInfo(qrPng) { UseShellExecute = true });
+            logger.LogInformation($"[BiliLearn] 已自动打开二维码: {qrPng}");
         }
         catch (Exception ex)
         {
-            return $"❌ 登录过程异常: {ex.Message}";
+            logger.LogWarning($"[BiliLearn] 自动打开二维码失败: {ex.Message}");
         }
+
+        // Poke消息（含Base64便于聊天窗口查看）
+        _interactor.Poke($"📱 **请用B站APP扫码登录**\n\n![QR](data:image/png;base64,{qrBase64})\n\n二维码已自动打开，有效期2分钟！");
+
+        // 注册后台轮询任务，不阻塞当前调用
+        var cts = new CancellationTokenSource();
+        _activeTasks["qr_verify"] = cts;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var deadline = DateTime.Now.AddMinutes(2);
+                var lastStatus = -1;
+
+                while (DateTime.Now < deadline && !cts.IsCancellationRequested)
+                {
+                    await Task.Delay(3000);
+                    var poll = await _orchestrator.BiliApi.PollQrCodeStatusAsync(qrInfo.QrCodeKey);
+
+                    if (poll.Status == 1)
+                    {
+                        _interactor.Poke($"✅ 登录成功！欢迎 **{poll.UserName ?? "主人"}** (UID: {poll.Mid})！");
+                        if (!string.IsNullOrEmpty(poll.Cookie))
+                        {
+                            _orchestrator.BiliApi.SetCookie(poll.Cookie);
+                            Configuration.Cookie = poll.Cookie;
+                            SaveConfigToDisk();
+                            _interactor.Poke("✅ Cookie已持久化，重启后仍保持登录状态");
+                        }
+                        _activeTasks.TryRemove("qr_verify", out _);
+                        return;
+                    }
+                    if (poll.Status == 0 && lastStatus != 0)
+                    {
+                        _interactor.Poke("✅ 已扫码，请在手机上确认登录...");
+                        lastStatus = 0;
+                    }
+                    else if (poll.Status == 2)
+                    {
+                        _interactor.Poke("⚠️ 二维码已过期，请重新生成");
+                        _activeTasks.TryRemove("qr_verify", out _);
+                        return;
+                    }
+                }
+
+                _activeTasks.TryRemove("qr_verify", out _);
+                if (!cts.IsCancellationRequested)
+                    _interactor.Poke("⏰ 二维码已过期，请重试");
+            }
+            catch (Exception ex)
+            {
+                _activeTasks.TryRemove("qr_verify", out _);
+                _interactor.Poke($"❌ 登录过程异常: {ex.Message}");
+            }
+        }, cts.Token);
+
+        // 立即返回，不阻塞对话
+        return "二维码已生成并自动打开，等待扫码结果推送...";
     }
 
-    [XmlFunction(FunctionMode.OneShot)]
-    [Description("退出B站登录，清除Cookie")]
-    public async Task<string> Logout()
+public async Task<string> Logout()
     {
         EnsureInitialized();
         if (_orchestrator == null) return "插件未初始化";
         try
         {
             Configuration.Cookie = "";
+            SaveConfigToDisk();
             _interactor.Poke("👋 已退出B站登录");
             return "✅ 已退出登录";
         }
@@ -411,6 +459,24 @@ public class BiliLearnModule(
                     await _progressReporter.ReportAsync("已取消重新学习。", ProgressLevel.LogAndPush);
                 PendingConfirmations.TryRemove(bvid, out _);
             }
+        }
+    }
+
+    private void SaveConfigToDisk()
+    {
+        try
+        {
+            var cfgPath = Path.Combine(AlifePath.StorageFolderPath, "Configuration/BiliLearn.CSharp.Plugin.BiliLearnModule.json");
+            string? dir = Path.GetDirectoryName(cfgPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+            string json = System.Text.Json.JsonSerializer.Serialize(Configuration, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(cfgPath, json);
+            logger.LogInformation("[BiliLearn] 配置已持久化到 {0}", cfgPath);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[BiliLearn] 持久化配置到磁盘失败");
         }
     }
 }
