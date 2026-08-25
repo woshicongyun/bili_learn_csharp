@@ -70,11 +70,15 @@ public class LLMIntegrator : IDisposable
 语音转录（共{audioTranscript.Count}条）:
 {string.Join("\n", audioTranscript.Take(50))}
 
+评论区高赞观点（共{ctx.Comments?.Count ?? 0}条）:
+{string.Join("\n", (ctx.Comments ?? new List<CommentItem>()).Take(10).Select(c => $"[{c.Author}]({c.LikeCount}赞): {c.Message}"))}
+
 请以JSON格式输出，包含以下字段：
 1. summary: 视频核心内容摘要（200字以内）
 2. category: 分类（技术教程/游戏/生活/娱乐/学习/其他）
 3. tags: 关键词标签列表（5-10个）
 4. keyPoints: 关键要点列表（3-5条）
+5. commentInsights: 评论区核心观点总结（100字以内）
 
 只输出JSON，不要有其他内容。";
 
@@ -166,6 +170,7 @@ public class LLMIntegrator : IDisposable
                 Tags = root.TryGetProperty("tags", out var tags) 
                     ? tags.EnumerateArray().Select(t => t.GetString() ?? "").ToList() 
                     : new List<string>(),
+                CommentInsights = root.TryGetProperty("commentInsights", out var ci) ? ci.GetString() : null,
                 CreatedAt = DateTime.Now
             };
         }

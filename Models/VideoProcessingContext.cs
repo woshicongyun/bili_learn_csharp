@@ -33,6 +33,10 @@ public class VideoProcessingContext
     // ASR
     public string? AsrTranscription { get; set; }
 
+    // 评论
+    public List<CommentItem> Comments { get; set; } = new();
+    public string? CommentInsights { get; set; }
+
     // LLM结果
     public string? FinalSummary { get; set; }
     public string? Category { get; set; }

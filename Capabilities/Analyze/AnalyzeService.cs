@@ -185,6 +185,20 @@ public class AnalyzeService : IAnalyzeService, IDisposable
                 $"🖼 视觉: {(sourceStatus["visual"] ? "✅" : "❌")}\n" +
                 $"正在调用语言模型进行综合分析...", ProgressLevel.LogAndPush);
 
+            // V2-S5: 获取热门评论
+            await _progressReporter.ReportAsync("💬 获取热门评论...", ProgressLevel.LogAndPush);
+            try
+            {
+                var comments = await _biliApi.GetTopCommentsAsync(ctx.Bvid, limit: 10, ct: cancellationToken);
+                ctx.Comments = comments;
+                await _progressReporter.ReportAsync($"✅ 获取评论成功: {comments.Count}条", ProgressLevel.LogAndPush);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "获取评论失败，跳过评论分析");
+                ctx.Comments = new List<CommentItem>();
+            }
+
             await _progressReporter.ReportAsync("🧠 LLM整合分析中...", ProgressLevel.LogAndPush);
             ctx.FinalSummary = await _llmIntegrator.GenerateSummaryAndCategoryAsync(ctx);
             if (string.IsNullOrEmpty(ctx.FinalSummary))

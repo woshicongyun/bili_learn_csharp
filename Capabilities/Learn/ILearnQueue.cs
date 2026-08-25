@@ -16,12 +16,12 @@ public interface ILearnQueue : IDisposable
     /// 加入单个视频（已去重检查）
     /// </summary>
     /// <returns>0=成功, 1=已在队列中, 2=队列已满, 3=已完成/失败/取消</returns>
-    int Enqueue(string bvid, string? title = null);
+    Task<int> Enqueue(string bvid, string? title = null);
 
     /// <summary>
     /// 批量加入视频
     /// </summary>
-    (int success, int skipped) EnqueueBatch(IEnumerable<string> bvids);
+    Task<(int success, int skipped)> EnqueueBatch(IEnumerable<string> bvids);
 
     /// <summary>
     /// 取消指定视频（分析中则CTS取消 / 排队下载中移除）

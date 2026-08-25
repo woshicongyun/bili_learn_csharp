@@ -1,16 +1,42 @@
+// <summary>
+// 学习队列管理器（V2-S4 SQLite持久化版本）
+// </summary>
+// <依赖>
+//   - IBiliLearnStore (SQLite持久化接口)
+//   - DownloadStage.cs (视频下载)
+//   - IAnalyzeService (三源解析)
+// </依赖>
+// <调用链>
+//   BiliLearnModule.LearnAsync -> LearnService.LearnAsync -> LearnQueue.EnqueueAsync
+//   Bootstrapper.Build -> LearnQueue初始化（注入Store）
+// </调用链>
+// <并发>
+//   SemaphoreSlim(1) 强制串行化写入SQLite
+//   后台循环异步处理队列（非阻塞）
+// </并发>
+// <状态>
+//   Queued -> Downloading -> Analyzing -> Learned/Failed
+//   启动时从SQLite恢复活跃任务（Queued/Downloading/Analyzing）
+// </状态>
+// <已知限制>
+//   - 队列任务状态流转必须通过EnqueueAsync/UpdateStatusAsync
+//   - SQLite文件损坏可能导致启动恢复失败
+// </已知限制>
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BiliLearn.CSharp.Plugin.Domain.Interfaces;
 using BiliLearn.CSharp.Plugin.Models;
 using Microsoft.Extensions.Logging;
 
 namespace BiliLearn.CSharp.Plugin.Capabilities.Learn;
 
 /// <summary>
-/// 学习队列实现（迁绑自 V1 QueueRunner：预下载并行 + 分析串行）
+/// 学习队列实现（V2-S4：SQLite持久化改造）
+/// 迁绑自 V1 QueueRunner：预下载并行 + 分析串行 + SQLite持久化
 /// </summary>
 public class LearnQueue : ILearnQueue
 {
@@ -25,6 +51,7 @@ public class LearnQueue : ILearnQueue
     private Task? _loopTask;
     private bool _running;
     private const int MaxQueued = 5;
+    private readonly IBiliLearnStore _store;
 
     /// <summary>当前所有视频状态快照</summary>
     public IReadOnlyList<VideoStatus> Snapshot
@@ -42,21 +69,66 @@ public class LearnQueue : ILearnQueue
         DownloadStage downloadStage,
         ILogger logger,
         Func<string, CancellationToken, Task<ProcessingResult>> analyzeFunc,
-        Func<string, Task>? pokeFunc = null)
+        Func<string, Task>? pokeFunc = null,
+        IBiliLearnStore? store = null)
     {
         _downloadStage = downloadStage;
         _logger = logger;
         _analyzeFunc = analyzeFunc;
         _pokeFunc = pokeFunc;
+        _store = store ?? throw new ArgumentNullException(nameof(store));
     }
 
-    /// <summary>启动后台调度循环</summary>
-    public void Start()
+    /// <summary>启动后台调度循环（含恢复逻辑）</summary>
+    public async void Start()
     {
         if (_running) return;
         _running = true;
+        
+        // 恢复活跃任务到内存
+        await RestoreActiveTasksAsync();
+        
         _loopTask = Task.Run(LoopAsync);
-        _logger.LogInformation("[LearnQueue] 队列循环已启动");
+        _logger.LogInformation("[LearnQueue] 队列循环已启动，已恢复{Count}个活跃任务", _queue.Count);
+    }
+
+    /// <summary>恢复活跃任务到内存</summary>
+    private async Task RestoreActiveTasksAsync()
+    {
+        try
+        {
+            var activeTasks = await _store.GetActiveTasksAsync();
+            lock (_lock)
+            {
+                foreach (var task in activeTasks)
+                {
+                    _queue.Add(new VideoStatus
+                    {
+                        Id = task.Id,
+                        Bvid = task.Bvid,
+                        Title = task.Title,
+                        Stage = task.Status switch
+                        {
+                            "Queued" => VideoStage.Queued,
+                            "Downloading" => VideoStage.Downloading,
+                            "Downloaded" => VideoStage.Downloaded,
+                            "Analyzing" => VideoStage.Analyzing,
+                            "Completed" => VideoStage.Completed,
+                            "Failed" => VideoStage.Failed,
+                            "Canceled" => VideoStage.Canceled,
+                            _ => VideoStage.Queued
+                        },
+                        QueuedAt = task.EnqueuedAt,
+                        Progress = task.Status == "Completed" ? 100 : 0
+                    });
+                }
+            }
+            _logger.LogInformation("[LearnQueue] 恢复完成，共{Count}个活跃任务", _queue.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[LearnQueue] 恢复活跃任务失败");
+        }
     }
 
     /// <summary>停止调度循环</summary>
@@ -84,6 +156,9 @@ public class LearnQueue : ILearnQueue
 
                 if (toDownload != null)
                 {
+                    // 更新SQLite状态
+                    var dbTask = _store.UpdateStatusAsync(toDownload.Id, "Downloading");
+                    
                     await _downloadStage.DownloadAsync(toDownload.Bvid,
                         p => { toDownload.Progress = p; return Task.CompletedTask; },
                         _cts.Token)
@@ -97,16 +172,22 @@ public class LearnQueue : ILearnQueue
                                     toDownload.Stage = VideoStage.Downloaded;
                                     toDownload.Progress = 100;
                                     toDownload.Error = null;
+                                    // 更新SQLite状态
+                                    _store.UpdateStatusAsync(toDownload.Id, "Downloaded").GetAwaiter().GetResult();
                                 }
                                 else if (r != null && r.Canceled)
                                 {
                                     toDownload.Stage = VideoStage.Canceled;
                                     _queue.Remove(toDownload);
+                                    // 从SQLite删除
+                                    _store.UpdateStatusAsync(toDownload.Id, "Canceled").GetAwaiter().GetResult();
                                 }
                                 else
                                 {
                                     toDownload.Stage = VideoStage.Failed;
                                     toDownload.Error = r?.Message ?? "下载失败";
+                                    // 更新SQLite状态
+                                    _store.UpdateStatusAsync(toDownload.Id, "Failed", error: toDownload.Error).GetAwaiter().GetResult();
                                 }
                             }
                             PokeStatus();
@@ -117,6 +198,9 @@ public class LearnQueue : ILearnQueue
                 var toAnalyze = GetNextForAnalysis();
                 if (toAnalyze != null)
                 {
+                    // 更新SQLite状态为Analyzing
+                    _store.UpdateStatusAsync(toAnalyze.Id, "Analyzing").GetAwaiter().GetResult();
+                    
                     await _analyzeSemaphore.WaitAsync();
                     try
                     {
@@ -130,16 +214,40 @@ public class LearnQueue : ILearnQueue
                                 toAnalyze.Stage = VideoStage.Completed;
                                 toAnalyze.Progress = 100;
                                 toAnalyze.Error = null;
+                                // 更新SQLite状态
+                                _store.UpdateStatusAsync(toAnalyze.Id, "Completed").GetAwaiter().GetResult();
+                                // V2-S4 JSON持久化：记录已学 + 学习历史
+                                var now = DateTime.Now;
+                                _store.MarkLearnedAsync(new LearnedRecord
+                                {
+                                    Bvid = result.Bvid,
+                                    Title = result.Title ?? toAnalyze.Bvid,
+                                    Summary = result.Summary ?? "",
+                                    Category = result.Category ?? "其他",
+                                    LearnedAt = now
+                                }).GetAwaiter().GetResult();
+                                _store.AddHistoryAsync(new HistoryRecord
+                                {
+                                    Bvid = result.Bvid,
+                                    Title = result.Title ?? toAnalyze.Bvid,
+                                    Summary = result.Summary ?? "",
+                                    Category = result.Category ?? "其他",
+                                    LearnedAt = now
+                                }).GetAwaiter().GetResult();
                             }
                             else if (_cts.IsCancellationRequested)
                             {
                                 toAnalyze.Stage = VideoStage.Canceled;
                                 _queue.Remove(toAnalyze);
+                                // 从SQLite删除
+                                _store.UpdateStatusAsync(toAnalyze.Id, "Canceled").GetAwaiter().GetResult();
                             }
                             else
                             {
                                 toAnalyze.Stage = VideoStage.Failed;
                                 toAnalyze.Error = result.Message;
+                                // 更新SQLite状态
+                                _store.UpdateStatusAsync(toAnalyze.Id, "Failed", error: result.Message).GetAwaiter().GetResult();
                             }
                         }
                         PokeStatus();
@@ -180,9 +288,9 @@ public class LearnQueue : ILearnQueue
         }
     }
 
-    /// <summary>入队（已去重检查）</summary>
+    /// <summary>入队（已去重检查，同时持久化到SQLite）</summary>
     /// <returns>0=成功, 1=已在队列中, 2=队列已满, 3=已在其他阶段</returns>
-    public int Enqueue(string bvid, string? title = null)
+    public async Task<int> Enqueue(string bvid, string? title = null)
     {
         lock (_lock)
         {
@@ -193,27 +301,50 @@ public class LearnQueue : ILearnQueue
             var queuedCount = _queue.Count(v => v.Stage == VideoStage.Queued);
             if (queuedCount >= MaxQueued)
                 return 2;
+        }
 
-            _queue.Add(new VideoStatus
+        // 先写库拿到自增ID，再塞内存（最终一致性）
+        try
+        {
+            var dbItem = new QueueItem
             {
                 Bvid = bvid,
-                Title = title,
-                Stage = VideoStage.Queued,
-                QueuedAt = DateTime.Now,
-                Progress = 0
-            });
+                Title = title ?? "",
+                Status = "Queued",
+                EnqueuedAt = DateTime.Now,
+                UpdatedAt = DateTime.Now
+            };
+            var id = await _store.EnqueueAsync(dbItem);
+
+            lock (_lock)
+            {
+                _queue.Add(new VideoStatus
+                {
+                    Id = id,
+                    Bvid = bvid,
+                    Title = title,
+                    Stage = VideoStage.Queued,
+                    QueuedAt = DateTime.Now,
+                    Progress = 0
+                });
+            }
             PokeStatus();
             return 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[LearnQueue] 持久化入队失败: {Bvid}", bvid);
+            return 2; // 写库失败视为队列不可用
         }
     }
 
     /// <summary>批量入队</summary>
-    public (int success, int skipped) EnqueueBatch(IEnumerable<string> bvids)
+    public async Task<(int success, int skipped)> EnqueueBatch(IEnumerable<string> bvids)
     {
         int success = 0, skipped = 0;
         foreach (var bvid in bvids)
         {
-            var r = Enqueue(bvid);
+            var r = await Enqueue(bvid);
             if (r == 0) success++; else skipped++;
         }
         PokeStatus();
@@ -236,14 +367,12 @@ public class LearnQueue : ILearnQueue
                     return true;
                 case VideoStage.Downloading:
                 case VideoStage.Analyzing:
-                    // 标记为取消，循环中会处理（下载/分析中的会在完成后判断Canceled）
-                    // 无法中断正在进行的下载/分析，但标记后会在结束时移除
+                    // 标记为取消，循环中会处理
                     item.Stage = VideoStage.Canceled;
                     PokeStatus();
-                    // 尝试取消当前分析（如果正在等待）
                     return true;
                 default:
-                    return false; // Completed/Failed/Downloaded 不可取消
+                    return false; // Completed/Failed 不可取消
             }
         }
     }
@@ -258,7 +387,7 @@ public class LearnQueue : ILearnQueue
             {
                 _queue.Remove(item);
             }
-            // 分析中的标记取消，循环结束后移除
+            // 分析中的标记取消
             var analyzing = _queue.FirstOrDefault(v => v.Stage == VideoStage.Analyzing);
             if (analyzing != null)
                 analyzing.Stage = VideoStage.Canceled;

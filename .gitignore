@@ -17,3 +17,5 @@ TestApi/
 # Config with secrets
 data/
 config.json
+.Alife/
+temp/

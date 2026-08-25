@@ -1,37 +1,36 @@
-
 using System;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BiliLearn.CSharp.Plugin.Domain.Interfaces;
 using BiliLearn.CSharp.Plugin.Models;
 using BiliLearn.CSharp.Plugin.Services;
 using Microsoft.Extensions.Logging;
 
 namespace BiliLearn.CSharp.Plugin;
 
-/// <summary>
-/// 待确认/重学确认服务：从 BiliLearnModule 中剥离的确认逻辑
-/// </summary>
 public class ConfirmationService
 {
     private readonly ConcurrentDictionary<string, PendingConfirmation> _pendingConfirmations = new();
     private readonly ILogger _logger;
     private readonly Func<string, Task> _poke;
     private readonly Func<string, CancellationToken, Task<ProcessingResult>> _processFunc;
+    private readonly IBiliLearnStore _store;
 
     public ConfirmationService(
         ILogger logger,
         Func<string, Task> poke,
-        Func<string, CancellationToken, Task<ProcessingResult>> processFunc)
+        Func<string, CancellationToken, Task<ProcessingResult>> processFunc,
+        IBiliLearnStore store)
     {
         _logger = logger;
         _poke = poke;
         _processFunc = processFunc;
+        _store = store;
     }
 
-    /// <summary>处理已学习过的视频，生成确认消息</summary>
-    public async Task<string> HandleExistingVideoAsync(string bvid, KnowledgeEntry entry, Func<string, Task> poke)
+    public async Task HandleExistingVideoAsync(string bvid, KnowledgeEntry entry, Func<string, Task> poke)
     {
         var pending = new PendingConfirmation
         {
@@ -46,10 +45,8 @@ public class ConfirmationService
 
         _pendingConfirmations[bvid] = pending;
         await poke($"📚 {pending.UserQuery}");
-        return "已学习过该视频，等待确认...";
     }
 
-    /// <summary>处理用户消息，检测确认回复</summary>
     public async Task OnMessageReceivedAsync(string message)
     {
         if (string.IsNullOrWhiteSpace(message)) return;
@@ -66,6 +63,7 @@ public class ConfirmationService
             if (confirmPatterns.Any(p => lowerMsg.Contains(p)))
             {
                 _logger.LogInformation("[BiliLearn] 确认重新学习: {Bvid}", bvid);
+                await _store.MarkLearnedAsync(new LearnedRecord { Bvid = bvid, Title = pending.OldEntry?.Title ?? bvid, Summary = "", Category = "其他" });
                 _ = Task.Run(async () =>
                 {
                     await _poke($"✅ 开始重新学习: {bvid}");

@@ -11,27 +11,17 @@ using Microsoft.Extensions.Logging;
 
 namespace BiliLearn.CSharp.Plugin.Services;
 
-/// <summary>
-/// JSON持久化存储（内存为主 + 节流写入 + 原子替换）
-/// 策略：
-///   - 频繁状态更新：脏标记 + 节流（3秒合并写盘）
-///   - 关键操作（入队/出队/完成/取消/历史追加）：立即强制刷盘
-///   - 单一文件 + tmp原子替换，保证最终一致
-/// </summary>
 public class JsonStore : IBiliLearnStore
 {
     private readonly object _lock = new();
     private readonly string _filePath;
     private readonly ILogger _logger;
-
-    // 内存数据（随时修改）
     private readonly ConcurrentDictionary<string, QueueItem> _queueMap = new();
     private readonly ConcurrentDictionary<string, LearnedRecord> _learnedMap = new();
     private readonly List<HistoryRecord> _historyList = new();
-
     private bool _isDirty = false;
     private DateTime _lastSaveTime = DateTime.Now;
-    private const int SaveIntervalMs = 3000; // 3秒内最多写一次磁盘
+    private const int SaveIntervalMs = 3000;
     private int _nextId = 1;
 
     public JsonStore(string workDir, ILogger logger)
@@ -43,20 +33,16 @@ public class JsonStore : IBiliLearnStore
         LoadFromDisk();
     }
 
-    // ---- 节流保存 ----
     private void MarkDirty(bool force = false)
     {
         lock (_lock)
         {
             _isDirty = true;
             if (force || (DateTime.Now - _lastSaveTime).TotalMilliseconds > SaveIntervalMs)
-            {
                 SaveToDiskInternal();
-            }
         }
     }
 
-    /// <summary>强制立即落盘（关键操作调用）</summary>
     private void Flush()
     {
         lock (_lock) SaveToDiskInternal();
@@ -99,16 +85,13 @@ public class JsonStore : IBiliLearnStore
             foreach (var l in data.Learned) _learnedMap[l.Bvid] = l;
             if (data.History != null) _historyList.AddRange(data.History);
             if (data.NextId > 0) _nextId = data.NextId;
-
-            // 启动恢复：Downloading/Analyzing 重置为 Queued（连接已断需重试）
-            var dangling = _queueMap.Values.Where(q =>
-                q.Status is "Downloading" or "Analyzing" or "Processing").ToList();
+            var dangling = _queueMap.Values.Where(q => q.Status is "Downloading" or "Analyzing" or "Processing").ToList();
             if (dangling.Count > 0)
             {
                 foreach (var q in dangling)
                 {
                     _queueMap[q.Bvid] = q with { Status = "Queued", Stage = null };
-                    _logger.LogInformation("[JsonStore] 重启重置 {Bvid} 为 Queued（原状态 {Status}）", q.Bvid, q.Status);
+                    _logger.LogInformation("[JsonStore] 重启重置 {Bvid} 为 Queued", q.Bvid);
                 }
                 SaveToDiskInternal();
             }
@@ -117,30 +100,26 @@ public class JsonStore : IBiliLearnStore
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[JsonStore] data.json 损坏，已降级为空状态启动");
+            _logger.LogWarning(ex, "[JsonStore] data.json 损坏");
         }
     }
 
-    // ---- IBiliLearnStore 实现 ----
     public Task<int> EnqueueAsync(QueueItem item)
     {
         var newItem = item with { Id = _nextId++, UpdatedAt = DateTime.Now };
         _queueMap[newItem.Bvid] = newItem;
-        MarkDirty(force: true); // 入队是用户手动触发，立即落盘
+        MarkDirty(force: true);
         return Task.FromResult(newItem.Id);
     }
 
     public Task<QueueItem?> DequeueAsync()
     {
-        var item = _queueMap.Values
-            .Where(q => q.Status == "Queued")
-            .OrderBy(q => q.Id)
-            .FirstOrDefault();
+        var item = _queueMap.Values.Where(q => q.Status == "Queued").OrderBy(q => q.Id).FirstOrDefault();
         if (item != null)
         {
             var updated = item with { Status = "Processing", Stage = "下载中", UpdatedAt = DateTime.Now };
             _queueMap[item.Bvid] = updated;
-            MarkDirty(force: true); // 出队关键操作，立即落盘
+            MarkDirty(force: true);
             return Task.FromResult<QueueItem?>(updated);
         }
         return Task.FromResult<QueueItem?>(null);
@@ -150,55 +129,91 @@ public class JsonStore : IBiliLearnStore
     {
         var kv = _queueMap.FirstOrDefault(kv => kv.Value.Id == id);
         if (kv.Key == null) return Task.CompletedTask;
-        var updated = kv.Value with
-        {
-            Status = status,
-            Stage = stage ?? kv.Value.Stage,
-            Error = error ?? kv.Value.Error,
-            UpdatedAt = DateTime.Now
-        };
+        var updated = kv.Value with { Status = status, Stage = stage ?? kv.Value.Stage, Error = error ?? kv.Value.Error, UpdatedAt = DateTime.Now };
         _queueMap[kv.Key] = updated;
-        // 终态立即落盘，中间状态节流
         MarkDirty(force: status is "Completed" or "Failed" or "Canceled");
         return Task.CompletedTask;
     }
 
     public Task<List<QueueItem>> GetActiveTasksAsync()
     {
-        var active = _queueMap.Values
-            .Where(q => q.Status is "Queued" or "Downloading" or "Downloaded" or "Analyzing" or "Processing")
-            .ToList();
+        var active = _queueMap.Values.Where(q => q.Status is "Queued" or "Downloading" or "Downloaded" or "Analyzing" or "Processing").ToList();
         return Task.FromResult(active);
     }
 
-    public Task<bool> IsLearnedAsync(string bvid) =>
-        Task.FromResult(_learnedMap.ContainsKey(bvid));
+    public Task<bool> IsLearnedAsync(string bvid) => Task.FromResult(_learnedMap.ContainsKey(bvid));
 
     public Task MarkLearnedAsync(LearnedRecord record)
     {
         _learnedMap[record.Bvid] = record;
-        MarkDirty(force: true); // 学习成果，必须落盘
+        MarkDirty(force: true);
         return Task.CompletedTask;
     }
 
     public Task AddHistoryAsync(HistoryRecord record)
     {
         _historyList.Add(record);
-        MarkDirty(force: true); // 历史记录，不能丢
+        MarkDirty(force: true);
         return Task.CompletedTask;
     }
 
     public Task<List<HistoryRecord>> GetHistoryAsync(int limit = 20, int offset = 0)
     {
-        var result = _historyList
-            .OrderByDescending(h => h.LearnedAt)
-            .Skip(offset)
-            .Take(limit)
-            .ToList();
+        var result = _historyList.OrderByDescending(h => h.LearnedAt).Skip(offset).Take(limit).ToList();
         return Task.FromResult(result);
     }
 
-    /// <summary>程序退出前调用，确保最后数据落盘</summary>
+    public Task<int> CleanQueueAsync()
+    {
+        lock (_lock)
+        {
+            var allItems = _queueMap.Values.ToList();
+            var toRemove = allItems.Where(q => q.Status is "Completed" or "Failed").ToList();
+            _logger.LogInformation("[JsonStore] CleanQueue: 队列总数={Total}, 待清理={Clean}", allItems.Count, toRemove.Count);
+            foreach (var item in toRemove)
+            {
+                _logger.LogInformation("[JsonStore] CleanQueue: 移除 {Bvid} [{Status}]", item.Bvid, item.Status);
+                _queueMap.TryRemove(item.Bvid, out _);
+            }
+            _isDirty = true; // 强制标记为脏，确保SaveToDiskInternal()执行
+            Flush();
+            return Task.FromResult(toRemove.Count);
+        }
+    }
+
+    public async Task SaveCommentsAsync(string bvid, List<CommentItem> comments)
+    {
+        lock (_lock)
+        {
+            var data = JsonSerializer.Deserialize<RootData>(File.ReadAllText(_filePath));
+            if (data != null)
+            {
+                data.Comments[bvid] = comments;
+                var json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
+                var tempPath = _filePath + ".tmp";
+                File.WriteAllText(tempPath, json);
+                File.Move(tempPath, _filePath, overwrite: true);
+                _logger.LogInformation("[JsonStore] 保存评论成功: {Bvid} 共{Count}条", bvid, comments.Count);
+            }
+        }
+        await Task.CompletedTask;
+    }
+
+    public async Task<List<CommentItem>> GetCommentsAsync(string bvid)
+    {
+        lock (_lock)
+        {
+            if (!File.Exists(_filePath))
+                return new List<CommentItem>();
+                
+            var data = JsonSerializer.Deserialize<RootData>(File.ReadAllText(_filePath));
+            if (data?.Comments.TryGetValue(bvid, out var comments) == true)
+                return comments;
+            return new List<CommentItem>();
+        }
+        await Task.CompletedTask;
+    }
+
     public void DisposeFlush()
     {
         Flush();
@@ -209,6 +224,7 @@ public class JsonStore : IBiliLearnStore
         public List<QueueItem> Queue { get; set; } = new();
         public List<LearnedRecord> Learned { get; set; } = new();
         public List<HistoryRecord> History { get; set; } = new();
+        public Dictionary<string, List<CommentItem>> Comments { get; set; } = new();
         public int NextId { get; set; } = 1;
     }
 }

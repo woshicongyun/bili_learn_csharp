@@ -11,7 +11,10 @@
   ],
   "dependencies": {
     "Alife.Function.FunctionCaller": "",
-    "Alife.Function.AIModelUtility": ""
+    "Alife.Function.AIModelUtility": "",
+    "Alife.Function.IVisionModel": "",
+    "Alife.Function.IAudioRecognizerProvider": "",
+    "Alife.Function.ILanguageModel": ""
   },
-  "version": "4.6.0"
+  "version": "1.00"
 }

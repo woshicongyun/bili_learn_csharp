@@ -1,4 +1,3 @@
-
 using System;
 using System.IO;
 using System.Threading.Tasks;
@@ -7,9 +6,6 @@ using Microsoft.Extensions.Logging;
 
 namespace BiliLearn.CSharp.Plugin.Capabilities.Auth;
 
-/// <summary>
-/// 认证服务实现：B站登录（迁绑自 V1 BiliLearnService 登录相关方法）
-/// </summary>
 public class AuthService : IAuthService
 {
     private readonly BiliLearnServices _services;
@@ -32,32 +28,34 @@ public class AuthService : IAuthService
         _onConfigChanged = onConfigChanged;
     }
 
-    /// <summary>检查登录状态</summary>
     public async Task CheckLoginAsync()
     {
         try
         {
             var result = await _services.BiliApi.VerifyLoginAsync();
             if (result.Valid && result.IsLogin)
-                _poke($"✅ 登录有效，用户: {result.UserName ?? result.Uname ?? "未知"} (UID: {result.Mid})");
+                await _poke($"✅ 登录有效，用户: {result.UserName ?? result.Uname ?? "未知"} (UID: {result.Mid})");
             else
-                _poke($"❌ 未登录或登录已失效: {result.Message}");
+                await _poke($"❌ 未登录或登录已失效: {result.Message}");
         }
         catch (Exception ex)
         {
-            _poke($"❌ 检查登录失败: {ex.Message}");
+            await _poke($"❌ 检查登录失败: {ex.Message}");
         }
     }
 
-    /// <summary>扫码登录</summary>
-    public async Task<string> QrVerifyAsync()
+    public async Task QrVerifyAsync()
     {
         var qrInfo = await _services.BiliApi.GenerateQrCodeAsync();
         if (!qrInfo.Success)
-            return $"❌ 生成二维码失败: {qrInfo.Message}";
+        {
+            await _poke($"❌ 生成二维码失败: {qrInfo.Message}");
+            return;
+        }
 
         var workDir = _services.WorkDir;
         var qrDir = Path.Combine(workDir, "temp");
+        Directory.CreateDirectory(qrDir);
         var qrPng = QrCodeGenerator.GeneratePng(qrInfo.QrCodeUrl, qrDir, _logger);
         var qrBase64 = Convert.ToBase64String(File.ReadAllBytes(qrPng));
 
@@ -71,10 +69,10 @@ public class AuthService : IAuthService
             _logger.LogWarning("[BiliLearn] 自动打开二维码失败: {0}", ex.Message);
         }
 
-        _poke($"📱 **请用B站APP扫码登录**\n\n![QR](data:image/png;base64,{qrBase64})\n\n二维码已自动打开，有效期2分钟！");
+        await _poke($"📱 **请用B站APP扫码登录**\n\n![QR](data:image/png;base64,{qrBase64})\n\n二维码已自动打开，有效期2分钟！");
 
-        // 后台轮询
-        _ = Task.Run(async () =>
+        // 使用fire-and-forget，确保Poke在主线程上下文中执行
+        var pollTask = Task.Run(async () =>
         {
             try
             {
@@ -86,44 +84,59 @@ public class AuthService : IAuthService
                     var poll = await _services.BiliApi.PollQrCodeStatusAsync(qrInfo.QrCodeKey);
                     if (poll.Status == 1)
                     {
-                        _poke($"✅ 登录成功！欢迎 **{poll.UserName ?? "主人"}** (UID: {poll.Mid})！");
+                        _logger.LogInformation("[BiliLearn] 扫码登录成功: {UserName} (UID: {Mid})", poll.UserName, poll.Mid);
+                        await _poke($"✅ 登录成功！欢迎 **{poll.UserName ?? "主人"}** (UID: {poll.Mid})！");
                         if (!string.IsNullOrEmpty(poll.Cookie))
                         {
                             _services.BiliApi.SetCookie(poll.Cookie);
                             _config.Cookie = poll.Cookie;
                             _onConfigChanged?.Invoke();
-                            _poke("✅ Cookie已持久化，重启后仍保持登录状态");
+                            _logger.LogInformation("[BiliLearn] Cookie已持久化");
+                            await _poke("✅ Cookie已持久化，重启后仍保持登录状态");
                         }
                         return;
                     }
                     if (poll.Status == 0 && lastStatus != 0)
                     {
-                        _poke("✅ 已扫码，请在手机上确认登录...");
+                        _logger.LogInformation("[BiliLearn] 已扫码，等待用户确认...");
+                        await _poke("✅ 已扫码，请在手机上确认登录...");
                         lastStatus = 0;
                     }
                     else if (poll.Status == 2)
                     {
-                        _poke("⚠️ 二维码已过期，请重新生成");
+                        _logger.LogWarning("[BiliLearn] 二维码已过期");
+                        await _poke("⚠️ 二维码已过期，请重新生成");
                         return;
                     }
                 }
-                _poke("⏰ 二维码已过期，请重试");
+                _logger.LogWarning("[BiliLearn] 扫码超时");
+                await _poke("⏰ 二维码已过期，请重试");
             }
             catch (Exception ex)
             {
-                _poke($"❌ 登录过程异常: {ex.Message}");
+                _logger.LogError(ex, "[BiliLearn] 登录过程异常");
+                await _poke($"❌ 登录过程异常: {ex.Message}");
             }
         });
-
-        return "二维码已生成并自动打开，等待扫码结果推送...";
+        
+        // 监听任务完成，防止静默失败
+        pollTask.ContinueWith(t =>
+        {
+            if (t.IsFaulted)
+            {
+                _logger.LogError(t.Exception, "[BiliLearn] 扫码轮询任务异常终止");
+            }
+        }, TaskScheduler.Default);
     }
 
-    /// <summary>清理临时文件夹（temp目录下视频、音频、关键帧等缓存文件）</summary>
-    public Task<string> CleanTempAsync()
+    public async Task CleanTempAsync()
     {
         var tempDir = Path.Combine(_services.WorkDir, "temp");
         if (!Directory.Exists(tempDir))
-            return Task.FromResult("✅ 临时目录不存在，无需清理");
+        {
+            await _poke("🧹 临时目录不存在，无需清理");
+            return;
+        }
 
         int deleted = 0;
         foreach (var f in Directory.GetFiles(tempDir))
@@ -136,17 +149,14 @@ public class AuthService : IAuthService
             Directory.Delete(d, true);
             deleted++;
         }
-        _poke($"🧹 已清理 {deleted} 个临时文件");
-        return Task.FromResult($"✅ 清理完成，删除 {deleted} 项");
+        await _poke($"🧹 已清理 {deleted} 个临时文件");
     }
 
-    /// <summary>退出登录</summary>
-    public Task<string> LogoutAsync()
+    public async Task LogoutAsync()
     {
         _services.BiliApi.ClearCookie();
         _config.Cookie = "";
         _onConfigChanged?.Invoke();
-        _poke("👋 已退出B站登录");
-        return Task.FromResult("✅ 已退出登录");
+        await _poke("👋 已退出B站登录");
     }
 }

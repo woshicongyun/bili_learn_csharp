@@ -189,13 +189,28 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
                     var uname = pollData["uname"]?.Value<string>() ?? "";
                     var mid = pollData["mid"]?.Value<long>() ?? 0;
 
+                    // 兜底：从Cookie中提取DedeUserID作为UID
+                    if (mid == 0)
+                    {
+                        foreach (var cookie in cookies)
+                        {
+                            if (cookie.StartsWith("DedeUserID="))
+                            {
+                                var parts = cookie.Split('=');
+                                if (parts.Length > 1 && long.TryParse(parts[1], out var parsedMid))
+                                    mid = parsedMid;
+                                break;
+                            }
+                        }
+                    }
+
                     if (string.IsNullOrEmpty(cookieStr))
                     {
                         _logger.LogWarning("扫码成功但未提取到Cookie");
                         return new QrCodePollResult { Status = 1, Message = "扫码成功但Cookie提取失败", Cookie = "" };
                     }
 
-                    _logger.LogInformation("扫码登录成功: {Uname} (MID: {Mid})", uname, mid);
+                    _logger.LogInformation("扫码登录成功: {Uname} (MID: {Mid})", uname ?? "未知用户", mid);
                     return new QrCodePollResult
                     {
                         Status = 1,
@@ -302,6 +317,7 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
                 Data = new VideoInfo
                 {
                     Bvid = bvid,
+                    Aid = videoData["aid"]?.Value<long>() ?? 0,
                     Cid = videoData["cid"]?.Value<long>() ?? 0,
                     Title = videoData["title"]?.Value<string>() ?? "",
                     DurationSeconds = videoData["duration"]?.Value<int>() ?? 0,
@@ -671,6 +687,70 @@ public class BilibiliApiService : IBilibiliFetcher, IDisposable
         {
             _logger.LogWarning(ex, "搜索视频异常: {Keyword}", keyword);
             return new List<VideoSearchResult>();
+        }
+    }
+
+
+    public async Task<List<CommentItem>> GetTopCommentsAsync(string bvid, int limit = 10, CancellationToken ct = default)
+    {
+        try
+        {
+            var infoResult = await GetVideoInfoAsync(bvid, ct);
+            if (!infoResult.Success || infoResult.Data == null)
+            {
+                _logger.LogWarning("获取视频信息失败: {Bvid}", bvid);
+                return new List<CommentItem>();
+            }
+
+            var aid = infoResult.Data.Aid;
+            if (aid == 0)
+            {
+                _logger.LogWarning("无法获取aid: {Bvid}", bvid);
+                return new List<CommentItem>();
+            }
+
+            var url = $"{BaseUrl}/x/v2/reply?type=1&oid={aid}&sort=1&ps={limit}&pn=1";
+            var response = await _httpClient.GetAsync(url, ct);
+            var json = await response.Content.ReadAsStringAsync();
+            var data = JObject.Parse(json);
+
+            if (data["code"]?.Value<int>() != 0)
+            {
+                _logger.LogWarning("获取评论失败: {Message}", data["message"]?.Value<string>());
+                return new List<CommentItem>();
+            }
+
+            var replies = data["data"]?["replies"] as JArray;
+            if (replies == null)
+            {
+                _logger.LogInformation("视频{Bvid}暂无评论", bvid);
+                return new List<CommentItem>();
+            }
+
+            var comments = new List<CommentItem>();
+            foreach (var reply in replies)
+            {
+                var member = reply["member"];
+                var content = reply["content"];
+                comments.Add(new CommentItem
+                {
+                    Rpid = reply["rpid"]?.Value<long>() ?? 0,
+                    MemberMid = member?["mid"]?.Value<string>() ?? "",
+                    Author = member?["uname"]?.Value<string>() ?? "未知用户",
+                    Message = content?["message"]?.Value<string>() ?? "",
+                    LikeCount = reply["like"]?.Value<int>() ?? 0,
+                    ReplyCount = reply["rcount"]?.Value<int>() ?? 0,
+                    Ctime = reply["ctime"]?.Value<long>() ?? 0
+                });
+            }
+
+            _logger.LogInformation("获取评论成功: {Bvid} 共{Count}条", bvid, comments.Count);
+            return comments;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "获取评论异常: {Bvid}", bvid);
+            return new List<CommentItem>();
         }
     }
 

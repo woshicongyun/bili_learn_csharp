@@ -5,6 +5,7 @@ namespace BiliLearn.CSharp.Plugin.Models;
 public class VideoInfo
 {
     public string Bvid { get; set; } = "";
+    public long Aid { get; set; }
     public long Cid { get; set; }
     public string Title { get; set; } = "";
     public int DurationSeconds { get; set; }

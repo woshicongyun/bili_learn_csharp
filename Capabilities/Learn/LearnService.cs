@@ -1,46 +1,61 @@
-
 using System;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using BiliLearn.CSharp.Plugin.Capabilities.Learn;
 using BiliLearn.CSharp.Plugin.Domain.Interfaces;
 using BiliLearn.CSharp.Plugin.Models;
+using BiliLearn.CSharp.Plugin.Services;
 using Microsoft.Extensions.Logging;
 
 namespace BiliLearn.CSharp.Plugin.Capabilities.Learn;
 
-/// <summary>
-/// 单视频学习流程实现（迁绑自 V1 BiliLearnService 学习相关方法）
-/// </summary>
 public class LearnService : ILearnService
 {
     private readonly BiliLearnServices _services;
     private readonly ConfirmationService _confirmationService;
     private readonly ILogger _logger;
     private readonly Func<string, Task> _poke;
+    private readonly IBiliLearnStore _store;
 
     public LearnService(
         BiliLearnServices services,
         ConfirmationService confirmationService,
         ILogger logger,
-        Func<string, Task> poke)
+        Func<string, Task> poke,
+        IBiliLearnStore store)
     {
         _services = services;
         _confirmationService = confirmationService;
         _logger = logger;
         _poke = poke;
+        _store = store;
     }
 
-    /// <summary>分析B站视频：入队处理</summary>
-    public async Task<string> LearnAsync(string bvid)
+    public async Task LearnAsync(string bvid)
     {
-        _logger.LogInformation("[LearnService] LearnAsync called, LearnQueue is null: {IsNull}", _services.LearnQueue == null);
-        // 检查是否已学习过
-        var existingEntry = await _services.KnowledgeRepo.GetByBvidAsync(bvid);
-        if (existingEntry != null)
-            return await _confirmationService.HandleExistingVideoAsync(bvid, existingEntry, _poke);
+        _logger.LogInformation("[LearnService] LearnAsync called");
 
-        // 先获取视频标题再入队
+        var isLearned = await _store.IsLearnedAsync(bvid);
+        if (isLearned)
+        {
+            var history = await _store.GetHistoryAsync(limit: 1, offset: 0);
+            var record = history.FirstOrDefault(h => h.Bvid == bvid);
+            if (record != null)
+            {
+                var entry = new KnowledgeEntry 
+                { 
+                    Bvid = record.Bvid, 
+                    Title = record.Title, 
+                    Category = record.Category, 
+                    Summary = record.Summary, 
+                    CreatedAt = record.LearnedAt 
+                };
+                await _confirmationService.HandleExistingVideoAsync(bvid, entry, _poke);
+                return;
+            }
+        }
+
         string? title = null;
         try
         {
@@ -49,28 +64,38 @@ public class LearnService : ILearnService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[LearnService] 获取视频信息失败，将使用BV号作为标题");
+            _logger.LogWarning(ex, "[LearnService] 获取视频信息失败");
         }
 
-        // 检查队列中是否已有
         if (_services.LearnQueue == null)
         {
-            _logger.LogError("[LearnService] LearnQueue is null! Cannot enqueue bvid: {Bvid}", bvid);
-            return "❌ LearnQueue未初始化";
+            _logger.LogError("[LearnService] LearnQueue is null!");
+            await _poke("❌ LearnQueue未初始化");
+            return;
         }
-        var enqueueResult = _services.LearnQueue.Enqueue(bvid, title);
-        return enqueueResult switch
+
+        var enqueueResult = await _services.LearnQueue.Enqueue(bvid, title);
+        switch (enqueueResult)
         {
-            0 => $"✅ 已加入学习队列：{title ?? bvid}，进度实时推送中...",
-            1 => $"⚠️ 该视频已在队列中（{title ?? bvid}）",
-            2 => "⚠️ 队列已满（最多5个排队中），请稍后再试",
-            3 => $"⚠️ 该视频已完成过或已取消：{title ?? bvid}，如需重新学习请回复确认",
-            _ => "❌ 入队失败"
-        };
+            case 0:
+                await _poke($"✅ 已加入学习队列：{title ?? bvid}，进度实时推送中...");
+                break;
+            case 1:
+                await _poke($"⚠️ 该视频已在队列中（{title ?? bvid}）");
+                break;
+            case 2:
+                await _poke("⚠️ 队列已满（最多5个排队中），请稍后再试");
+                break;
+            case 3:
+                await _poke($"⚠️ 该视频已完成过或已取消：{title ?? bvid}，如需重新学习请回复确认");
+                break;
+            default:
+                await _poke("❌ 入队失败");
+                break;
+        }
     }
 
-    /// <summary>批量入队</summary>
-    public async Task<string> LearnBatchAsync(string bvidsCsv)
+    public async Task LearnBatchAsync(string bvidsCsv)
     {
         var bvids = bvidsCsv.Split(',', '，', ' ', '\t')
             .Select(b => b.Trim())
@@ -78,103 +103,127 @@ public class LearnService : ILearnService
             .ToList();
 
         if (bvids.Count == 0)
-            return "❌ 未识别到有效的BV号，请用逗号分隔多个视频";
+        {
+            await _poke("❌ 未识别到有效的BV号");
+            return;
+        }
 
-        // 检查已学过的
         var newBvids = new System.Collections.Generic.List<string>();
         foreach (var bvid in bvids)
         {
-            var existing = await _services.KnowledgeRepo.GetByBvidAsync(bvid);
-            if (existing != null)
-                await _confirmationService.HandleExistingVideoAsync(bvid, existing, _poke);
+            var isLearned = await _store.IsLearnedAsync(bvid);
+            if (isLearned)
+            {
+                var history = await _store.GetHistoryAsync(limit: 1, offset: 0);
+                var record = history.FirstOrDefault(h => h.Bvid == bvid);
+                if (record != null)
+                {
+                    var entry = new KnowledgeEntry 
+                    { 
+                        Bvid = record.Bvid, 
+                        Title = record.Title, 
+                        Category = record.Category, 
+                        Summary = record.Summary, 
+                        CreatedAt = record.LearnedAt 
+                    };
+                    await _confirmationService.HandleExistingVideoAsync(bvid, entry, _poke);
+                }
+            }
             else
+            {
                 newBvids.Add(bvid);
+            }
         }
 
         if (newBvids.Count == 0)
-            return "✅ 所有视频均已学习过，已发送确认消息等待回复";
+        {
+            await _poke("✅ 所有视频均已学习过");
+            return;
+        }
 
-        var (success, skipped) = _services.LearnQueue.EnqueueBatch(newBvids);
+        var (success, skipped) = await _services.LearnQueue.EnqueueBatch(newBvids);
         if (success > 0)
-            return $"✅ 已加入队列 {success} 个视频，跳过 {skipped} 个（队列满或重复），进度实时推送中...";
-        return $"⚠️ 入队失败：成功 {success} 个，跳过 {skipped} 个";
+            await _poke($"✅ 已加入队列 {success} 个视频，跳过 {skipped} 个，进度实时推送中...");
+        else
+            await _poke($"⚠️ 入队失败：成功 {success} 个，跳过 {skipped} 个");
     }
 
-    /// <summary>取消分析</summary>
-    public Task<string> CancelLearnAsync(string bvid)
+    public async Task CancelLearnAsync(string bvid)
     {
         if (_services.LearnQueue == null)
-            return Task.FromResult("❌ LearnQueue未初始化");
+        {
+            await _poke("❌ LearnQueue未初始化");
+            return;
+        }
         if (_services.LearnQueue.Cancel(bvid))
         {
-            _poke($"🛑 已取消: {bvid}");
-            return Task.FromResult($"✅ 已取消: {bvid}");
+            await _poke($"🛑 已取消: {bvid}");
         }
-        return Task.FromResult($"⚠️ 未找到该视频（可能已完成/失败/不在队列中）: {bvid}");
+        else
+        {
+            await _poke($"⚠️ 未找到该视频（可能已完成/失败/不在队列中）: {bvid}");
+        }
     }
 
-    /// <summary>获取队列状态</summary>
-    public Task<string> GetQueueStatusAsync()
+    public async Task GetQueueStatusAsync()
     {
-        _logger.LogInformation("[LearnService] GetQueueStatusAsync called, LearnQueue is null: {IsNull}, _services is null: {ServicesNull}", _services.LearnQueue == null, _services == null);
         if (_services == null)
-            return Task.FromResult("❌ Services未初始化");
+        {
+            await _poke("❌ Services未初始化");
+            return;
+        }
         if (_services.LearnQueue == null)
-            return Task.FromResult("❌ LearnQueue未初始化");
-        
-        try
         {
-            var snapshot = _services.LearnQueue.Snapshot;
-            _logger.LogInformation("[LearnService] Snapshot count: {Count}", snapshot.Count);
-            if (snapshot.Count == 0)
-                return Task.FromResult("📋 B站学习队列为空");
+            await _poke("❌ LearnQueue未初始化");
+            return;
+        }
 
-            var sb = new StringBuilder();
-            sb.AppendLine($"📋 B站学习队列（共{snapshot.Count}个）");
-            for (int i = 0; i < snapshot.Count; i++)
-            {
-                var v = snapshot[i];
-                string icon = v.Stage switch
-                {
-                    VideoStage.Queued => "⏳",
-                    VideoStage.Downloading => "⬇",
-                    VideoStage.Downloaded => "⏸",
-                    VideoStage.Analyzing => "▶",
-                    VideoStage.Completed => "✅",
-                    VideoStage.Failed => "❌",
-                    VideoStage.Canceled => "🚫",
-                    _ => "❓"
-                };
-                string detail = v.Stage switch
-                {
-                    VideoStage.Queued => "排队中",
-                    VideoStage.Downloading => $"下载中 {v.Progress}%",
-                    VideoStage.Downloaded => "等待分析",
-                    VideoStage.Analyzing => $"分析中 {v.Progress}%",
-                    VideoStage.Completed => "完成",
-                    VideoStage.Failed => $"失败: {v.Error ?? "未知"}",
-                    VideoStage.Canceled => "已取消",
-                    _ => ""
-                };
-                sb.AppendLine($"{icon} ({i + 1}/{snapshot.Count}) {v.Bvid} 【{v.Title ?? "未命名"}】 {detail}");
-            }
-            int done = snapshot.Count(v => v.Stage == VideoStage.Completed);
-            int failed = snapshot.Count(v => v.Stage == VideoStage.Failed);
-            sb.AppendLine($"✅ 完成{done} | ❌ 失败{failed} | 剩余{snapshot.Count - done - failed}");
-            var result = sb.ToString();
-            _poke(result);
-            return Task.FromResult(result);
-        }
-        catch (Exception ex)
+        var snapshot = _services.LearnQueue.Snapshot;
+        if (snapshot.Count == 0)
         {
-            _logger.LogError(ex, "[LearnService] Error getting queue status");
-            return Task.FromResult($"❌ 获取队列状态失败: {ex.Message}");
+            await _poke("📋 B站学习队列为空");
+            return;
         }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"📋 B站学习队列（共{snapshot.Count}个）");
+        for (int i = 0; i < snapshot.Count; i++)
+        {
+            var v = snapshot[i];
+            string icon = v.Stage switch
+            {
+                VideoStage.Queued => "⏳",
+                VideoStage.Downloading => "⬇",
+                VideoStage.Downloaded => "⏸",
+                VideoStage.Analyzing => "▶",
+                VideoStage.Completed => "✅",
+                VideoStage.Failed => "❌",
+                VideoStage.Canceled => "🚫",
+                _ => "❓"
+            };
+            string detail = v.Stage switch
+            {
+                VideoStage.Queued => "排队中",
+                VideoStage.Downloading => $"下载中 {v.Progress}%",
+                VideoStage.Downloaded => "等待分析",
+                VideoStage.Analyzing => $"分析中 {v.Progress}%",
+                VideoStage.Completed => "完成",
+                VideoStage.Failed => $"失败: {v.Error ?? "未知"}",
+                VideoStage.Canceled => "已取消",
+                _ => ""
+            };
+            sb.AppendLine($"{icon} ({i + 1}/{snapshot.Count}) {v.Bvid} 【{v.Title ?? "未命名"}】 {detail}");
+        }
+        int done = snapshot.Count(v => v.Stage == VideoStage.Completed);
+        int failed = snapshot.Count(v => v.Stage == VideoStage.Failed);
+        sb.AppendLine($"✅ 完成{done} | ❌ 失败{failed} | 剩余{snapshot.Count - done - failed}");
+        await _poke(sb.ToString());
     }
 
-    public void Dispose()
+    public Task AnalyzeAsync(string bvid)
     {
-        _services.LearnQueue?.Dispose();
-        _services.AnalyzeService?.Dispose();
+        // AnalyzeAsync 由 AnalyzeService 处理，此处仅占位实现
+        _logger.LogInformation("[LearnService] AnalyzeAsync called, bvid={Bvid}", bvid);
+        return Task.CompletedTask;
     }
 }

@@ -1,8 +1,10 @@
-
 {
-  "Version": "4.2.0",
+  "Version": "1.00",
   "Dependencies": {
     "Alife.Function.FunctionCaller": "",
-    "Alife.Function.AIModelUtility": ""
+    "Alife.Function.AIModelUtility": "",
+    "Alife.Function.IVisionModel": "",
+    "Alife.Function.IAudioRecognizerProvider": "",
+    "Alife.Function.ILanguageModel": ""
   }
 }

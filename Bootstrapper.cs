@@ -1,3 +1,21 @@
+// <summary>
+// 服务装配器（V2-S4 SQLite注入版本）
+// </summary>
+// <依赖>
+//   - JsonStore.cs (JSON持久化实现)
+//   - LearnQueue.cs (队列管理)
+//   - LearnService.cs (学习服务)
+// </依赖>
+// <调用链>
+//   BiliLearnModule.OnLoaded -> Bootstrapper.Build -> 注入各服务
+// </调用链>
+// <启动恢复>
+//   LearnQueue构造函数中从SQLite恢复活跃任务
+// </启动恢复>
+// <已知限制>
+//   - Store必须在LearnQueue和LearnService初始化前创建
+// </已知限制>
+
 
 using System;
 using System.IO;
@@ -11,8 +29,19 @@ using BiliLearn.CSharp.Plugin.Capabilities.Analyze;
 using BiliLearn.CSharp.Plugin.Capabilities.Learn;
 using BiliLearn.CSharp.Plugin.Services;
 using Microsoft.Extensions.Logging;
-
 namespace BiliLearn.CSharp.Plugin;
+
+public class BiliLearnServices
+{
+    public required IAnalyzeService AnalyzeService { get; init; }
+    public required IBilibiliFetcher BiliApi { get; init; }
+    public required IKnowledgeRepository KnowledgeRepo { get; init; }
+    public required IProgressReporter ProgressReporter { get; init; }
+    public required string WorkDir { get; init; }
+    public required LearnService LearnService { get; init; }
+    public required LearnQueue LearnQueue { get; init; }
+    public required IBiliLearnStore Store { get; init; }
+}
 
 /// <summary>
 /// 服务装配器：从 BiliLearnModule 中剥离初始化逻辑
@@ -38,9 +67,12 @@ public static class Bootstrapper
 
         // 1. 基础服务
         var biliApi = new BilibiliApiService(cfg.Cookie ?? "", logger);
-        var downloader = new MediaDownloader(logger);
+        var downloader = new MediaDownloader(logger, cfg);
 
-        // 2. 分析处理器
+        // 2. SQLite持久化（先初始化）
+        var store = new JsonStore(workDir, logger);
+        
+        // 3. 分析处理器
         var visionProcessor = new VisionProcessor(visionModel, logger);
         var audioProcessor = new AudioProcessor(audioRecognizerProvider, logger);
         var subtitleProcessor = new SubtitleProcessor(logger);
@@ -91,12 +123,14 @@ public static class Bootstrapper
         var confirmation = new ConfirmationService(
             logger,
             msg => { interactor.Poke(msg); return System.Threading.Tasks.Task.CompletedTask; },
-            analyzeService.ProcessAsync);
+            analyzeService.ProcessAsync,
+            store);
 
         // 9. 队列组件
         var learnQueue = new LearnQueue(
             downloadStage, logger, analyzeService.ProcessAsync,
-            msg => { interactor.Poke(msg); return System.Threading.Tasks.Task.CompletedTask; });
+            msg => { interactor.Poke(msg); return System.Threading.Tasks.Task.CompletedTask; },
+            store);
 
         learnQueue.Start();
 
@@ -110,9 +144,11 @@ public static class Bootstrapper
                 ProgressReporter = progressReporter,
                 WorkDir = workDir,
                 LearnService = null!,
-                LearnQueue = learnQueue
+                LearnQueue = learnQueue,
+                Store = store
             }, confirmation, logger,
-            msg => { interactor.Poke(msg); return System.Threading.Tasks.Task.CompletedTask; });
+            msg => { interactor.Poke(msg); return System.Threading.Tasks.Task.CompletedTask; },
+            store);
 
         return new BiliLearnServices
         {
@@ -122,19 +158,10 @@ public static class Bootstrapper
             ProgressReporter = progressReporter,
             WorkDir = workDir,
             LearnService = learnService,
-            LearnQueue = learnQueue
+            LearnQueue = learnQueue,
+            Store = store
         };
     }
 }
 
 /// <summary>Bootstrapper 返回的容器</summary>
-public class BiliLearnServices
-{
-    public required IAnalyzeService AnalyzeService { get; init; }
-    public required IBilibiliFetcher BiliApi { get; init; }
-    public required IKnowledgeRepository KnowledgeRepo { get; init; }
-    public required IProgressReporter ProgressReporter { get; init; }
-    public required string WorkDir { get; init; }
-    public required LearnService LearnService { get; init; }
-    public required LearnQueue LearnQueue { get; init; }
-}

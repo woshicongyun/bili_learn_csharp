@@ -22,4 +22,11 @@ public interface IBiliLearnStore
     // 历史操作
     Task AddHistoryAsync(HistoryRecord record);
     Task<List<HistoryRecord>> GetHistoryAsync(int limit = 20, int offset = 0);
+    
+    // 队列清理（返回清理数量）
+    Task<int> CleanQueueAsync();
+    
+    // 评论操作
+    Task SaveCommentsAsync(string bvid, List<CommentItem> comments);
+    Task<List<CommentItem>> GetCommentsAsync(string bvid);
 }

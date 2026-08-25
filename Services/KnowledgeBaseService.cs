@@ -8,6 +8,8 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using BiliLearn.CSharp.Plugin.Domain.Interfaces;
 
+using BiliLearn.CSharp.Plugin.Models;
+
 namespace BiliLearn.CSharp.Plugin.Services;
 
 public class KnowledgeEntry
@@ -23,6 +25,16 @@ public class KnowledgeEntry
     public List<string> Tags { get; set; } = new();
     public Dictionary<string, string> Metadata { get; set; } = new();
     public DateTime CreatedAt { get; set; } = DateTime.Now;
+    
+    /// <summary>
+    /// 评论区核心观点总结
+    /// </summary>
+    public string? CommentInsights { get; set; }
+    
+    /// <summary>
+    /// 评论列表
+    /// </summary>
+    public List<CommentItem>? Comments { get; set; }
 }
 
 /// <summary>

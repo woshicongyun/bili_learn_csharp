@@ -1,4 +1,3 @@
-
 using System;
 
 namespace BiliLearn.CSharp.Plugin.Models;
@@ -18,10 +17,14 @@ public enum VideoStage
 /// <summary>每个视频的状态模型（供队列调度与状态Poke使用）</summary>
 public class VideoStatus
 {
+    /// <summary>数据库ID（持久化后赋值）</summary>
+    public int Id { get; set; }
+    
     public string Bvid { get; set; } = "";
     public VideoStage Stage { get; set; } = VideoStage.Queued;
     public string? Title { get; set; }          // 视频标题（入队时可先取）
     public int Progress { get; set; }           // 0-100 进度
     public string? Error { get; set; }          // 失败原因
     public DateTime QueuedAt { get; set; }      // 入队时间
+    public DateTime UpdatedAt { get; set; }     // 最后更新时间
 }

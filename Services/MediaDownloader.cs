@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using BiliLearn.CSharp.Plugin.Models;
 using BiliLearn.CSharp.Plugin.Utils;
 
 namespace BiliLearn.CSharp.Plugin.Services;
@@ -17,23 +18,40 @@ public sealed class MediaDownloader : IDisposable
     private readonly HttpClient _httpClient;
     private readonly ILogger _logger;
 
-    private const int ChunkSize = 512 * 1024; // 512KB 分片
-    private const int MaxRetries = 3;
-    private const int MaxConcurrentVideoSegments = 4;
+    private readonly int _chunkSize = 512 * 1024;
+    private readonly int _maxRetries = 3;
+    private readonly int _maxConcurrentSegments = 4;
+    private readonly TimeSpan _timeout = TimeSpan.FromSeconds(300);
+    private readonly string _userAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+    private readonly double _retryBaseDelaySeconds = 1.5;
     private bool _disposed = false;
 
-    public MediaDownloader(ILogger logger)
+    public MediaDownloader(ILogger logger) : this(logger, null) { }
+
+    public MediaDownloader(ILogger logger, BiliLearnConfig? config)
     {
         _logger = logger;
+        config ??= new BiliLearnConfig();
+
+        // 从配置取值（带容错）
+        _timeout = TimeSpan.FromSeconds(Math.Max(1, config.HttpTimeoutSeconds));
+        _maxRetries = Math.Max(1, config.MaxRetries);
+        _chunkSize = Math.Max(64 * 1024, config.ChunkSize);
+        _maxConcurrentSegments = Math.Max(1, config.MaxConcurrentSegments);
+        _retryBaseDelaySeconds = Math.Max(0.1, config.RetryBaseDelaySeconds);
+        _userAgent = string.IsNullOrWhiteSpace(config.UserAgent)
+            ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            : config.UserAgent;
+
         _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(_userAgent);
         _httpClient.DefaultRequestHeaders.Referrer = new Uri("https://www.bilibili.com");
         _httpClient.DefaultRequestHeaders.Add("Origin", "https://www.bilibili.com");
         _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
         _httpClient.DefaultRequestHeaders.AcceptLanguage.Add(new StringWithQualityHeaderValue("zh-CN", 0.9));
         _httpClient.DefaultRequestHeaders.AcceptLanguage.Add(new StringWithQualityHeaderValue("zh", 0.8));
-        _httpClient.Timeout = TimeSpan.FromSeconds(300);
+        _httpClient.Timeout = _timeout;
     }
 
     /// <summary>
@@ -45,7 +63,7 @@ public sealed class MediaDownloader : IDisposable
         string partPath = outputPath + ".part";
 
         Exception? lastEx = null;
-        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        for (int attempt = 1; attempt <= _maxRetries; attempt++)
         {
             try
             {
@@ -60,8 +78,8 @@ public sealed class MediaDownloader : IDisposable
             {
                 lastEx = ex;
                 _logger.LogWarning(ex, "下载失败(第{Attempt}次尝试): {Url}", attempt, url);
-                if (attempt < MaxRetries)
-                    await Task.Delay(TimeSpan.FromSeconds(1.5 * attempt), ct);
+                if (attempt < _maxRetries)
+                    await Task.Delay(TimeSpan.FromSeconds(_retryBaseDelaySeconds * attempt), ct);
             }
         }
         throw lastEx ?? new Exception("下载失败");
@@ -76,7 +94,7 @@ public sealed class MediaDownloader : IDisposable
         string partPath = outputPath + ".part";
 
         Exception? lastEx = null;
-        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        for (int attempt = 1; attempt <= _maxRetries; attempt++)
         {
             try
             {
@@ -99,8 +117,8 @@ public sealed class MediaDownloader : IDisposable
             {
                 lastEx = ex;
                 _logger.LogWarning(ex, "并发下载失败(第{Attempt}次尝试): {Url}", attempt, url);
-                if (attempt < MaxRetries)
-                    await Task.Delay(TimeSpan.FromSeconds(1.5 * attempt), ct);
+                if (attempt < _maxRetries)
+                    await Task.Delay(TimeSpan.FromSeconds(_retryBaseDelaySeconds * attempt), ct);
             }
         }
         throw lastEx ?? new Exception("并发下载失败");
